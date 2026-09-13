@@ -92,15 +92,55 @@ def build_blueprint() -> Blueprint:
         return _ok(_user_payload())
 
     @bp.post("/api/system/user/update_user_info/")
+    @bp.put("/api/system/user/update_user_info/")
     def update_user_info():
         data = dict(_user_payload())
         data.update(request.get_json(silent=True) or {})
         return _ok(data, "已更新（本地演示不会真的落库）")
 
     @bp.post("/api/system/user/change_password/")
+    @bp.put("/api/system/user/change_password/")
     @bp.post("/api/system/user/login_change_password/")
     def change_password():
         return _ok(None, "本地演示环境不需要改密码")
+
+    @bp.post("/api/system/file/")
+    def upload_file():
+        """文件/头像上传（前端 `personal/api.ts` 的 uploadAvatar 打的就是这里）。
+
+        以前这个接口**根本不存在**：浏览器先发 OPTIONS 预检 → 拿到 404 →
+        控制台报的却是 "CORS policy: Response to preflight request doesn't pass
+        access control check"，真正的 404 被跨域错误盖住了，所以现象是"更新头像更新不了"。
+        这里落盘到 data/uploads/，并按 dvadmin 约定回 {url, name}；前端把 data.url 当头像地址，
+        再经 `getBaseURL()` 拼上 VITE_API_URL，所以 url 给 `/media/uploads/<文件名>` 即可。
+        """
+        import time
+        from pathlib import Path
+
+        from .config import config
+        item = request.files.get("file") or request.files.get("files")
+        if item is None and request.files:
+            item = next(iter(request.files.values()))
+        if item is None or not item.filename:
+            return _ok(None, "没有收到文件（表单字段名用 file）"), 400
+        # 文件名只保留字母数字与 . _ -（避免路径穿越 / 奇怪字符）
+        safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in Path(item.filename).name)
+        target_dir = config.upload_dir.parent / "uploads"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stored = f"{int(time.time())}-{safe or 'upload'}"
+        (target_dir / stored).write_bytes(item.read())
+        return _ok({"url": f"/media/uploads/{stored}", "name": item.filename,
+                    "file_name": stored, "size": (target_dir / stored).stat().st_size})
+
+    @bp.get("/media/<path:relpath>")
+    def uploaded_media(relpath):
+        """上传文件的静态访问入口（头像的 <img src> 指向这里）。"""
+        from flask import send_from_directory
+
+        from .config import config
+        # 挂 data/ 而不是 data/uploads/：上传返回的是 /media/uploads/<文件>，
+        # 若把 uploads 目录本身挂在 /media 下，就会去找 uploads/uploads/<文件> → 404（头像破图）
+        return send_from_directory(config.upload_dir.parent, relpath)
 
     @bp.get("/api/system/menu/web_router/")
     def web_router():
@@ -172,6 +212,34 @@ def register_dvadmin(app) -> None:
     """注册兼容接口，并给**整个应用**装上 CORS（前端 8080 → 本服务 5000 是跨域）。"""
     app.register_blueprint(build_blueprint())
 
+    @app.get("/media/<path:relpath>")
+    def uploaded_media(relpath):
+        """上传文件的静态访问入口（头像 <img src> 指向这里）。
+
+        注册在 **app** 而不是 blueprint 上：blueprint 可能带 url_prefix，
+        挂上去会变成 /api/media/... ，前端拿到的相对地址 /media/... 就 404（破图）。
+        """
+        from flask import send_from_directory
+
+        from .config import config
+        # 挂 data/ 而不是 data/uploads/：上传返回的是 /media/uploads/<文件>，
+        # 若把 uploads 目录本身挂在 /media 下，就会去找 uploads/uploads/<文件> → 404（头像破图）
+        return send_from_directory(config.upload_dir.parent, relpath)
+
+    @app.before_request
+    def _preflight():
+        """所有 OPTIONS 预检直接回 2xx（CORS 头由下面的 after_request 补）。
+
+        不这么做的话：**未实现**的接口在预检阶段就 404，浏览器只会报
+        "CORS policy: preflight request ... does not have HTTP ok status" ——
+        一个"接口没写"的问题被伪装成"跨域配置错"，排查时极容易跑偏
+        （这一次的"头像更新不了"就是这么被误导的）。
+        只拦 OPTIONS：GET/POST 等仍走正常路由，未实现的接口照旧回 JSON 404。
+        """
+        if request.method == "OPTIONS":
+            return "", 200
+        return None
+
     @app.after_request
     def _cors(response):                       # noqa: ANN001
         response.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
@@ -188,7 +256,7 @@ def register_dvadmin(app) -> None:
 
         注意：这里**不能**用 `@app.route('/api/<path:...>', methods=['OPTIONS'])` 那种兜底路由——
         它会参与 URL 匹配，把未注册的 /api/xxx 请求截成 405 METHOD NOT ALLOWED。
-        CORS 预检由 Flask 对已注册路由自动处理，再经上面的 after_request 补头即可。
+        CORS 预检已由上面的 `_preflight`（before_request，只拦 OPTIONS）统一放行。
         """
         if request.path.startswith("/api/"):
             return jsonify({

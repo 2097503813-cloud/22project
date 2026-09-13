@@ -390,8 +390,13 @@
 		</template>
 	</el-dialog>
 
+	<!-- meta.json 全文：底部给一个固定的「关闭」按钮，JSON 区域自己内部滚动，
+	     否则几百行的长文本会把按钮顶到屏幕外面去 -->
 	<el-dialog v-model="dialog.meta" :title="`${dialog.model} 的 meta.json`" width="70%">
-		<pre class="pre">{{ dialog.metaText }}</pre>
+		<pre class="pre" style="max-height: 62vh; overflow: auto; margin: 0">{{ dialog.metaText }}</pre>
+		<template #footer>
+			<el-button type="primary" @click="dialog.meta = false">关闭</el-button>
+		</template>
 	</el-dialog>
 	<el-dialog v-model="dialog.task" :title="`推理任务 #${dialog.taskId}`" width="80%">
 		<el-descriptions v-if="dialog.taskData" :column="1" border size="small">

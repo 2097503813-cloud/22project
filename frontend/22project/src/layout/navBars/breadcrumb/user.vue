@@ -36,20 +36,7 @@
 		<div class="layout-navbars-breadcrumb-user-icon" @click="onLayoutSetingClick">
 			<i class="icon-skin iconfont" :title="$t('message.user.title3')"></i>
 		</div>
-		<div class="layout-navbars-breadcrumb-user-icon">
-			<el-popover placement="bottom" trigger="hover" transition="el-zoom-in-top" :width="300" :persistent="false">
-				<template #reference>
-					<el-badge :value="messageCenter.unread" :hidden="messageCenter.unread === 0">
-						<el-icon :title="$t('message.user.title4')">
-							<ele-Bell />
-						</el-icon>
-					</el-badge>
-				</template>
-				<template #default>
-					<UserNews />
-				</template>
-			</el-popover>
-		</div>
+		<!-- 消息铃铛与 SSE 已移除：消息中心页面没有了，且 /sse/ 是桩，连上就报错刷控制台 -->
 		<div class="layout-navbars-breadcrumb-user-icon mr10" @click="onScreenfullClick">
 			<i
 				class="iconfont"
@@ -96,7 +83,7 @@ import { Session, Local } from '/@/utils/storage';
 import headerImage from '/@/assets/img/headerImage.png';
 import { InfoFilled } from '@element-plus/icons-vue';
 // 引入组件
-const UserNews = defineAsyncComponent(() => import('/@/layout/navBars/breadcrumb/userNews.vue'));
+	// UserNews（消息铃铛组件）已随消息中心一起移除
 const Search = defineAsyncComponent(() => import('/@/layout/navBars/breadcrumb/search.vue'));
 
 // 定义变量内容
@@ -212,41 +199,11 @@ onMounted(() => {
 		initI18nOrSize('globalComponentSize', 'disabledSize');
 		initI18nOrSize('globalI18n', 'disabledI18n');
 	}
-	getMessageCenterCount();
 });
 
-//消息中心的未读数量
-import { messageCenterStore } from '/@/stores/messageCenter';
-import { getBaseURL } from '/@/utils/baseUrl';
-const messageCenter = messageCenterStore();
-let eventSource: EventSource | null = null; // 存储 EventSource 实例
-const token = Session.get('token');
-const isConnected = ref(false); // 标志变量，记录是否已连接过
-const getMessageCenterCount = () => {
-	// 创建 EventSource 实例并连接到后端 SSE 端点
-	eventSource = new EventSource(`${getBaseURL()}sse/?token=${token}`); // 替换为你的后端地址
-	// 首次连接成功时打印一次
-	eventSource.onopen = function () {
-		if (!isConnected.value) {
-			console.log('SSE 首次连接成功');
-			isConnected.value = true; // 设置标志为已连接
-		}
-	};
-	// 监听消息事件
-	eventSource.onmessage = function (event) {
-		console.log(event.data);
-
-		messageCenter.setUnread(+event.data); // 更新总记录数
-	};
-
-	// 错误处理
-	eventSource.onerror = function (err) {
-		console.error('SSE 错误:', err);
-		if (eventSource !== null && eventSource.readyState === EventSource.CLOSED) {
-			console.log('连接已关闭');
-		}
-	};
-};
+// 原本这里有一大段「消息中心未读数」的 SSE 逻辑（new EventSource(.../sse/?token=...)）：
+// 后端 /sse/ 只是个一次性空流桩，连上即关闭 → 控制台每次都刷 "SSE 错误"。
+// 消息中心页面已移除，这段一并删掉，控制台干净了。
 </script>
 
 <style scoped lang="scss">

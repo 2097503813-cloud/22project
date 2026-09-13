@@ -15,7 +15,7 @@
 						<el-button size="small" @click="loadModels">刷新</el-button>
 					</span>
 				</template>
-				<el-table :data="mergedRows" size="small" highlight-current-row empty-text="还没有登记/产物"
+				<el-table ref="tableRef" :data="mergedRows" size="small" highlight-current-row empty-text="还没有登记/产物"
 					@current-change="onRowClick" style="cursor: pointer">
 					<!-- 四栏都用 min-width 且取值相同：el-table 会按 min-width 比例分配剩余宽度，
 					     于是四栏最终等宽（原来是"头栏吃掉全部余量"，看着忽宽忽窄） -->
@@ -61,6 +61,8 @@
 				<template #header>
 					<span>模型展示：{{ overview?.model || '未选择' }} 的模型参数</span>
 					<span class="hint" style="margin-left: 8px">点上方列表任意一行查看</span>
+					<!-- 关闭按钮：清空 overview 并取消表格行高亮，回到"尚未选择模型" -->
+					<el-button v-if="overview" link type="danger" style="float: right; margin-left: 12px" @click="closeOverview">关闭</el-button>
 					<el-button v-if="overview" link type="primary" style="float: right" @click="showMeta(overview.model)">meta.json 全文</el-button>
 				</template>
 				<div v-if="!overview" class="empty">尚未选择模型</div>
@@ -545,7 +547,14 @@ const loadModels = async () => {
 	artifacts.value = res.artifacts || [];
 	dbModels.value = res.db_models || [];
 };
+const tableRef = ref<any>();
 const onRowClick = (row: any) => { if (row?.name) loadOverview(row.name); };
+/** 关掉下方的「模型展示」卡片：清空 overview，同时取消表格行高亮
+ *  （只清 overview 的话会出现"行还高亮着、卡片却说尚未选择模型"的错位） */
+const closeOverview = () => {
+	overview.value = null;
+	tableRef.value?.setCurrentRow?.();
+};
 const loadOverview = async (name: string) => {
 	overview.value = (await platformApi.modelOverview(name)) as any;
 };

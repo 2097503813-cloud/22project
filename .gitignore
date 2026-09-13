@@ -35,3 +35,6 @@ _unused_dvadmin/
 *.swp
 Thumbs.db
 desktop.ini
+
+# DSH 工具自身的文件
+.deepseek/

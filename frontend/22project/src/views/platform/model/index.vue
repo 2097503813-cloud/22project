@@ -61,9 +61,10 @@
 				<template #header>
 					<span>模型展示：{{ overview?.model || '未选择' }} 的模型参数</span>
 					<span class="hint" style="margin-left: 8px">点上方列表任意一行查看</span>
-					<!-- float:right 的规则是"先出现的更靠右"，所以 meta.json 写在前面 = 它在最右边 -->
-					<el-button v-if="overview" link type="primary" style="float: right" @click="showMeta(overview.model)">meta.json 全文</el-button>
-					<el-button v-if="overview" link type="primary" style="float: right; margin-left: 12px" @click="closeOverview">关闭</el-button>
+					<!-- float:right 的规则是"先出现的更靠右"，所以 meta.json 写在前面 = 它在最右边。
+					     两个都是实体按钮（去掉 link）：meta.json 白底描边，关闭是蓝色主按钮。 -->
+					<el-button v-if="overview" size="small" style="float: right" @click="showMeta(overview.model)">meta.json 全文</el-button>
+					<el-button v-if="overview" size="small" type="primary" style="float: right; margin-left: 8px" @click="closeOverview">关闭</el-button>
 				</template>
 				<div v-if="!overview" class="empty">尚未选择模型</div>
 				<template v-else>

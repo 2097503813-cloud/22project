@@ -1,0 +1,37 @@
+# ---------------- Python ----------------
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 本地数据库配置（含账号密码，不入库；克隆后按 项目交接文档.md §1 自己建一份 db.env）
+db.env
+.env
+.env.local
+
+# ---------------- Node / 前端 ----------------
+node_modules/
+dist/
+.vite/
+*.local
+npm-debug.log*
+
+# ---------------- 运行期产物（可重新生成，不入库）----------------
+testRestfulProject/data/logs/
+testRestfulProject/data/figures/
+testRestfulProject/data/tmp/
+testRestfulProject/data/.tmpcheck/
+data/logs/
+data/figures/
+
+# ---------------- 暂时挪走的 dvadmin 无用代码 ----------------
+# 见 项目技术详解.md §8：想恢复就把它移回 frontend/22project/src/
+_unused_dvadmin/
+
+# ---------------- 编辑器 / 系统 ----------------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

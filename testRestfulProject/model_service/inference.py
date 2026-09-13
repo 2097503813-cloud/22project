@@ -1,0 +1,441 @@
+# -*- coding: utf-8 -*-
+"""推理：流程图里的「推理」盒子。
+
+一次 /predict 做四件事：
+    1. 取模型产物（registry）——没有就明确报错，提示先调 /train
+    2. 校验输入（长度必须等于训练时的 input_len；**出现 NaN / Inf 直接拒收**）
+    3. 按框架分流：tensorflow-keras → 类别+置信度；pytorch → 类别+置信度；adtk → 是否异常+异常占比
+    4. 按外键顺序落库：InferenceTasks（挂 TrainingID 锚点）→ InferenceResults（每条样本一行）
+       另外给每次调用留一条 ModelInvocations
+
+输入校验这一条是刻意加严的：原数据管线会把越界切片补成整行 NaN（实测测试集里 10%），
+那种样本喂进模型只会得到无意义的输出。与其静默产出垃圾，不如在入口就拒绝并说清原因。
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+
+from . import datasets as ds
+from . import tabular
+from .config import config
+from .db import DBError, database
+from .figures import inference_figures
+from .registry import load_artifact
+
+
+class InvalidInput(ValueError):
+    """输入不合法（长度不符、含 NaN/Inf、文件不可读等）。"""
+
+
+# ------------------------------------------------------------------ 取输入
+def _guard_path(raw_path: str) -> Path:
+    """只允许读工作区（D:\\22project）内的文件，挡掉路径穿越。"""
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = config.project_dir / p
+    p = p.resolve()
+    if config.workspace_dir.resolve() not in p.parents and p != config.workspace_dir.resolve():
+        raise InvalidInput(f"出于安全考虑，只允许读取工作区内的文件：{config.workspace_dir}")
+    if not p.is_file():
+        raise InvalidInput(f"文件不存在：{p}")
+    return p
+
+
+def _read_signal(path: Path, column: str | None = None, sheet: str | int | None = None) -> tuple[np.ndarray, str]:
+    """读一列信号。支持 .mat（CWRU 的 DE 通道）、.npy、以及表格文件（csv/txt/xlsx/xls）。"""
+    suffix = path.suffix.lower()
+    if suffix == ".mat":
+        return ds.read_de_channel(path), "matlab"
+    if suffix == ".npy":
+        return np.asarray(np.load(path)).ravel().astype(float), "npy"
+    if tabular.is_table(path):
+        values = tabular.read_signal(path, column=column, sheet=sheet)
+        return values, "tabular"
+    raise InvalidInput(f"暂不支持的文件类型：{suffix}（支持 .mat / .npy / .csv / .txt / .xlsx / .xls）")
+
+
+def _windows_from_signal(signal: np.ndarray, input_len: int, start_index: int = 0,
+                         limit: int = 1) -> np.ndarray:
+    """按窗口切出待推理样本，越界直接报错而不是补 NaN。"""
+    windows = []
+    for i in range(start_index, start_index + limit):
+        begin = i * input_len
+        end = begin + input_len
+        if end > signal.size:
+            raise InvalidInput(
+                f"窗口 {i} 越界：需要信号长度 ≥ {end}，实际只有 {signal.size}。"
+                f"（这正是原管线补 NaN 的地方，服务侧选择拒绝）")
+        windows.append(signal[begin:end])
+    return np.asarray(windows, dtype=float)
+
+
+def _build_matrix(samples, path, input_len: int, index: int, limit: int,
+                  column: str | None = None, sheet: str | int | None = None) -> tuple[np.ndarray, dict]:
+    """把 samples / path 两种入参统一成 (n, input_len) 矩阵。"""
+    info: dict = {"source": None}
+    if samples is not None:
+        arr = np.asarray(samples, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.ndim != 2:
+            raise InvalidInput("samples 必须是二维数组（每行一个样本）或一维单样本")
+        info["source"] = "inline_samples"
+        return arr, info
+
+    if not path:
+        raise InvalidInput("必须提供 samples（内联数组）或 path（工作区内的 .mat/.csv/.npy/.xlsx）")
+    file_path = _guard_path(path)
+    signal, kind = _read_signal(file_path, column=column, sheet=sheet)
+    info.update({"source": "path", "path": str(file_path), "format": kind,
+                 "signal_points": int(signal.size), "window_index": index, "limit": limit,
+                 "column": column, "sheet": sheet})
+    return _windows_from_signal(signal, input_len, index, limit), info
+
+
+def _validate(matrix: np.ndarray, input_len: int) -> None:
+    if matrix.shape[1] != input_len:
+        raise InvalidInput(f"每个样本长度必须是 {input_len}，收到 {matrix.shape[1]}")
+    if not np.all(np.isfinite(matrix)):
+        bad = np.where(~np.isfinite(matrix).all(axis=1))[0].tolist()[:5]
+        raise InvalidInput(f"样本里存在 NaN/Inf（行号 {bad} ...），拒绝推理。"
+                           f"这类样本通常来自数据切片越界后的 NaN 填充。")
+    if matrix.shape[0] == 0:
+        raise InvalidInput("没有可推理的样本")
+
+
+# ------------------------------------------------------------------ 三种框架
+def _apply_scaler(artifact, matrix: np.ndarray) -> np.ndarray:
+    """套用训练时保存的标准化参数。
+
+    这一步不能省：模型是在 (x-μ)/σ 之后的分布上学的，若推理侧直接喂原始振动值，
+    同一个模型会给出完全错误的类别（本服务第一次端到端验证时就踩了这个坑：
+    测试集准确率 0.83 的模型，对原始信号窗口的预测全是错的）。
+    """
+    scaler_file = artifact.meta.get("scaler_file")
+    if not scaler_file:
+        return matrix
+    path = artifact.directory / scaler_file
+    if not path.is_file():
+        return matrix
+    with np.load(path) as npz:
+        mean, scale = npz["mean"], npz["scale"]
+    return (matrix - mean) / scale
+
+
+def _predict_keras(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    import tensorflow.keras as keras
+    model = keras.models.load_model(artifact.weights)
+    scaled = _apply_scaler(artifact, matrix)
+    # 用「实际窗口长度」兜底：上传的模型可能没有 input_len，直接下标会 KeyError → 500
+    length = int(artifact.meta.get("input_len") or matrix.shape[1])
+    probs = model.predict(scaled.reshape(-1, length, 1), verbose=0)
+    labels = artifact.meta.get("labels") or [f"class_{i}" for i in range(probs.shape[1])]
+    return [_classification_row(i, probs[i], labels, top_k) for i in range(len(probs))]
+
+
+def _predict_torch(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    import torch
+    mod = _import_module("cwt_cnn", "cwt_cnn_pytorch")
+    input_len = int(artifact.meta.get("input_len") or matrix.shape[1])   # 缺 input_len 时按实际窗口长度
+    payload = torch.load(artifact.weights, map_location="cpu", weights_only=False)
+    model = mod.build_model(num_classes=payload.get("num_classes", artifact.meta.get("num_classes") or 10),
+                           length=input_len)
+    model.load_state_dict(payload["state_dict"])
+    model.eval()
+    scaled = _apply_scaler(artifact, matrix)
+    x = torch.tensor(scaled.reshape(-1, 1, input_len), dtype=torch.float32)
+    with torch.no_grad():
+        logits = model(x)
+        probs = torch.softmax(logits, dim=1).numpy()
+    labels = artifact.meta.get("labels") or [f"class_{i}" for i in range(probs.shape[1])]
+    return [_classification_row(i, probs[i], labels, top_k) for i in range(len(probs))]
+
+
+def _predict_adtk(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    """adtk 路线：每个窗口算特征 → adtk 的 PCA 重构误差 → 与训练时标定的阈值比较。
+
+    关键：`matrix` 的每一行是**一个窗口**（不是单个采样点）。adtk 的
+    `PcaReconstructionError` 把 DataFrame 的**每一行**当成高维空间里的一个点，
+    所以必须按行组装；训练侧共用同一套特征（`training.adtk_window_features`）避免走样。
+    """
+    import pickle
+
+    import pandas as pd
+    from .training import adtk_window_features          # 懒导入，避免与 training 循环依赖
+
+    # 安全闸门：.pkl 是 pickle，反序列化 = 执行代码。上传接口刻意**不**反序列化上传的 .pkl，
+    # 推理侧必须保持同一口径，否则等于给了"上传一个 pkl 就能在服务端执行代码"的入口。
+    # 本机训练出来的产物 meta 里有 trusted=True；上传的一律 trusted=False。
+    if artifact.meta.get("trusted", True) is False and not os.environ.get("MODEL_ALLOW_UNTRUSTED_PICKLE"):
+        raise InvalidInput(
+            f"产物 {artifact.meta.get('model') or artifact.version} 是**上传**的（不可信来源），"
+            f"出于安全考虑不会反序列化它的 {Path(artifact.weights).name}；"
+            f"要放行请设置环境变量 MODEL_ALLOW_UNTRUSTED_PICKLE=1 后重启服务")
+
+    with open(artifact.weights, "rb") as fh:
+        bundle = pickle.load(fh)
+
+    if bundle.get("feature_mode") and bundle.get("transformer") is not None:       # —— 新格式产物
+        mode = str(bundle["feature_mode"])
+        rate = float(bundle.get("sampling_rate") or 48000)
+        features = matrix.astype(float) if mode == "raw" else np.asarray(
+            [adtk_window_features(window, rate) for window in matrix])
+        frame = pd.DataFrame(features, index=pd.date_range("2017-01-01", periods=features.shape[0], freq="s"))
+        scores = np.asarray(bundle["transformer"].transform(frame), dtype=float).ravel()
+        raw_threshold = bundle.get("threshold")
+        if raw_threshold is None or float(raw_threshold) <= 0:      # 阈值缺失/为 0 → 会把所有窗口都判异常
+            raise InvalidInput("产物里的 threshold 缺失或非法（<=0），请重新训练 adtk 生成完整产物")
+        threshold = float(raw_threshold)
+        base = float(bundle.get("score_median") or 0.0)
+        rows = []
+        for i, score in enumerate(scores):
+            is_anomaly = bool(score > threshold)
+            rows.append({
+                "index": i,
+                "is_anomaly": is_anomaly,
+                "anomaly_score": round(float(score), 6),
+                "predicted_class": 1 if is_anomaly else 0,
+                "predicted_label": "异常" if is_anomaly else "正常",
+                "predicted_category": "AnomalyDetection",
+                "detail": {"detector": bundle.get("detector_name"),
+                           "baseline": bundle.get("baseline_source"),
+                           "feature_mode": mode,
+                           "重构误差": round(float(score), 6),
+                           "判定阈值": round(threshold, 6),
+                           "正常分数中位": round(base, 6),
+                           "相对正常倍数": round(float(score) / (base + 1e-12), 2)},
+            })
+        return rows
+
+    # —— 老格式产物（点级 detect + 异常占比）还能跑，但实测没有判别力，建议重新训练 ——
+    detector = bundle.get("detector")
+    columns = bundle.get("columns") or ["value"]
+    reference = float(bundle.get("baseline_ratio") or 0.0)
+    factor = float(bundle.get("factor") or 1.3)
+    threshold = max(reference * factor, reference + 0.02)
+    rows = []
+    for i, window in enumerate(matrix):
+        # PcaAD 属于 multivariate 检测器：fit/detect 都要求 DataFrame，
+        # 传 Series 会抛 "Input must be a pandas DataFrame."
+        frame = pd.DataFrame({columns[0]: window},
+                             index=pd.date_range("2017-01-01", periods=len(window), freq="s"))
+        flagged = detector.detect(frame)
+        flags = np.asarray(pd.Series(flagged).fillna(False).astype(bool))
+        ratio = float(flags.mean()) if flags.size else 0.0
+        is_anomaly = bool(ratio > threshold)
+        rows.append({
+            "index": i,
+            "is_anomaly": is_anomaly,
+            "anomaly_score": round(ratio, 6),
+            "anomaly_points": int(flags.sum()),
+            "points": int(flags.size),
+            "predicted_class": 1 if is_anomaly else 0,
+            "predicted_label": "异常" if is_anomaly else "正常",
+            "predicted_category": "AnomalyDetection",
+            "detail": {"detector": bundle.get("detector_name"),
+                       "baseline": bundle.get("baseline_source"),
+                       "异常点占比": round(ratio, 6),
+                       "基线参考占比": round(reference, 6),
+                       "判定阈值": round(threshold, 6),
+                       "倍数": factor,
+                       "注意": "老格式产物（点级异常占比），实测判别力很差，建议重新训练 adtk"},
+        })
+    return rows
+
+
+def _classification_row(i: int, prob_row: np.ndarray, labels: list, top_k: int) -> dict:
+    order = np.argsort(prob_row)[::-1][:max(1, int(top_k))]
+    best = int(order[0])
+    return {
+        "index": i,
+        "predicted_class": best,
+        "predicted_label": labels[best] if best < len(labels) else f"class_{best}",
+        "predicted_category": "Classification",
+        "confidence": round(float(prob_row[best]), 6),
+        "score": round(float(prob_row[best]), 6),
+        "top_k": [{"class_id": int(c), "label": labels[c] if c < len(labels) else f"class_{c}",
+                   "probability": round(float(prob_row[c]), 6)} for c in order],
+        "detail": {"类别总数": len(labels), "第二名概率": round(float(prob_row[int(order[1])]), 6) if len(order) > 1 else None},
+    }
+
+
+def _import_module(dir_name: str, module_name: str):
+    d = str(config.project_dir / dir_name)
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    return importlib.import_module(module_name)
+
+
+_DISPATCH = {"tensorflow-keras": _predict_keras, "pytorch": _predict_torch, "adtk": _predict_adtk}
+
+
+# ------------------------------------------------------------------ 落库
+def _resolve_anchor(model_name: str, training_id: int | None) -> tuple[dict | None, int | None]:
+    """确定 InferenceTasks 的外键锚点（TrainingID，NOT NULL）。"""
+    from .training import db_model_name
+    if training_id is not None:
+        row = database.training_by_id(int(training_id))
+        if row is None:
+            raise DBError(f"TrainingID={training_id} 不存在")
+        return row, int(training_id)
+    row = database.latest_training(db_model_name(model_name))
+    return row, (int(row["TrainingID"]) if row else None)
+
+
+def _write_db(model_name: str, artifact, payload: dict, input_info: dict, predictions: list[dict],
+              training_id: int | None, duration_ms: int, client_ip: str | None, request_params: dict,
+              output_path: str | None = None) -> dict:
+    """InferenceTasks → InferenceResults（+ ModelInvocations）。"""
+    from .training import db_model_name
+    try:
+        training_row, anchor = _resolve_anchor(model_name, training_id)
+        if anchor is None:
+            return {"written": False, "dialect": database.dialect,
+                    "error": f"库中没有 {model_name} 的成功训练记录，而 InferenceTasks.TrainingID 是 NOT NULL 外键；"
+                             f"先调 /train 或显式传 training_id"}
+        model_id = database.ensure_model(db_model_name(model_name))
+        source_path = input_info.get("path")
+        # 内联样本没有"数据集"这一概念，但 InferenceTasks.TargetDatasetID 是 NOT NULL，
+        # 所以按模型登记一条 ADHOC 数据集，避免为了满足外键去伪造真实数据集。
+        dataset_id = database.ensure_dataset(
+            f"ADHOC-{model_name}", source=source_path or "内联数组(/predict samples)",
+            sample_count=payload["count"], class_count=artifact.meta.get("num_classes"),
+            data_path=source_path, description="推理时的临时输入登记")
+
+        rows = []
+        for pred in predictions:
+            # 先序列化再判断长度：直接按字符截（`[:500]`）会把 JSON 切成半截，落库就是坏数据
+            snapshot = json.dumps({"top_k": pred.get("top_k", [])[:1]}, ensure_ascii=False)
+            rows.append({
+                "row_identifier": f"{Path(source_path).name if source_path else 'inline'}#{pred['index']}",
+                "predicted_value": pred.get("confidence"),
+                "anomaly_score": pred.get("anomaly_score"),
+                "is_anomaly": pred.get("is_anomaly"),
+                "predicted_category": pred.get("predicted_category"),
+                "confidence": pred.get("confidence"),
+                "feature_snapshot": snapshot if len(snapshot) <= 500 else json.dumps({"truncated": True}),
+                "model_id": model_id,
+                "sample_index": pred["index"],
+                "predicted_class": pred.get("predicted_class"),
+                "predicted_label": pred.get("predicted_label"),
+                "score": pred.get("score"),
+                "actual_class": pred.get("actual_class"),
+                "detail": pred.get("detail"),
+            })
+        # 任务与结果**同一事务**提交：分两次提交会留下"有任务、没结果"的孤儿任务
+        # （Status=成功、Progress=100，但明细点开是空的）
+        task_id, written = database.insert_task_with_results({
+            "training_id": anchor, "target_dataset_id": dataset_id,
+            "task_name": f"predict-{model_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            "task_type": artifact.meta.get("task", "classification"), "status": "成功",
+            "inference_params": request_params,
+            "result_summary": {"样本数": payload["count"], "模型版本": artifact.version,
+                               "输入来源": input_info.get("source"), "锚点训练": anchor,
+                               "预测分布": payload["summary"]},
+            "model_id": model_id, "input_path": source_path, "output_path": output_path, "progress": 100,
+            "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "completed": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }, rows)
+
+        database.insert_invocation(
+            model_id=model_id, training_id=anchor, api_endpoint="/predict",
+            request_params=request_params, response_result={"count": payload["count"], "summary": payload["summary"]},
+            duration_ms=duration_ms, is_success=True, status_code=200,
+            client_ip=client_ip, status="成功",
+        )
+        return {"written": True, "dialect": database.dialect, "InferenceTaskID": task_id,
+                "results_written": written, "TrainingID": anchor, "DatasetID": dataset_id, "ModelID": model_id}
+    except DBError as exc:
+        return {"written": False, "dialect": database.dialect, "error": str(exc)}
+    except Exception as exc:                                        # pragma: no cover
+        return {"written": False, "dialect": database.dialect, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ------------------------------------------------------------------ 统一入口
+def predict(model: str | None = None, samples=None, path: str | None = None, index: int = 0,
+            limit: int = 1, version: str | None = None, training_id: int | None = None,
+            top_k: int = 3, write_db: bool = True, client_ip: str | None = None,
+            column: str | None = None, sheet: str | int | None = None) -> dict:
+    """推理入口。返回结构化结果 + 落库回执。"""
+    from .training import normalize_model
+    try:
+        name = normalize_model(model)
+    except ValueError:
+        # 上传进来的模型名不在别名表里（1dcnn/cwt_cnn/adtk），按原名解析产物目录
+        name = (model or "").strip()
+        if not name:
+            raise InvalidInput("必须提供 model")
+    started = time.time()
+    artifact = load_artifact(name, version)
+    input_len = int(artifact.meta.get("input_len") or 784)
+
+    matrix, input_info = _build_matrix(samples, path, input_len, int(index), int(limit),
+                                       column=column, sheet=sheet)
+    _validate(matrix, input_len)
+
+    handler = _DISPATCH.get(artifact.framework)
+    if handler is None:
+        raise InvalidInput(f"产物框架 {artifact.framework} 暂不支持推理")
+    predictions = handler(artifact, matrix, int(top_k))
+
+    # 若输入来自登记过的数据集文件，顺便补上真实类别，便于直接看对错
+    labels = artifact.meta.get("labels") or []
+    actual = None
+    if input_info.get("path"):
+        stem = Path(input_info["path"]).name
+        for row in ds.CWRU_0HP_CLASSES:
+            if row[0] == stem:
+                actual = row[1]
+                break
+    if actual is not None:
+        for pred in predictions:
+            pred["actual_class"] = actual
+
+    if artifact.meta.get("task") == "classification":
+        from collections import Counter
+        counter = Counter(p["predicted_label"] for p in predictions)
+        summary = dict(counter)
+        if actual is not None:
+            summary = {"真实类别": labels[actual] if actual < len(labels) else actual,
+                       "预测": summary,
+                       "是否全部命中": all(p["predicted_class"] == actual for p in predictions)}
+    else:
+        flagged = sum(1 for p in predictions if p.get("is_anomaly"))
+        summary = {"异常样本": flagged, "正常样本": len(predictions) - flagged}
+
+    payload = {
+        "model": name,
+        "version": artifact.version,
+        "framework": artifact.framework,
+        "task": artifact.meta.get("task"),
+        "input_len": input_len,
+        "count": len(predictions),
+        "input": input_info,
+        "predictions": predictions,
+        "summary": summary,
+    }
+
+    # ---- 出图：预测分布 + 窗口波形（失败不影响推理结果）----
+    figure_result = inference_figures(name, artifact.version, payload, matrix)
+    payload["figures"] = figure_result["figures"]
+    payload["figures_dir"] = figure_result["dir"]
+    if figure_result.get("error"):
+        payload["figures_error"] = figure_result["error"]
+
+    if write_db:
+        payload["db"] = _write_db(name, artifact, payload, input_info, predictions, training_id,
+                                  int((time.time() - started) * 1000), client_ip,
+                                  {"model": name, "version": version, "path": path,
+                                   "samples": f"{matrix.shape[0]}x{matrix.shape[1]}" if samples is not None else None,
+                                   "index": index, "limit": limit},
+                                  output_path=figure_result["dir"])
+    return payload

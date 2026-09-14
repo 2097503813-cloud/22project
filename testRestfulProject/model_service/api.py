@@ -287,44 +287,15 @@ def _resolve_workspace_path(raw: str) -> Path:
 
 
 class ApiIndex(Resource):
-    """GET /api —— 接口索引，给人和「系统管理→接口索引」页看的自描述清单。"""
+    """GET / —— 接口索引，给人和「系统管理→接口索引」页看的自描述清单（/api 是同一个东西）。"""
 
     def get(self):
-        # ⚠️ 这份清单是**手写**的，不是从 Flask 的 url_map 自动生成的 —— 新增路由时必须同步这里，
-        # 否则「接口索引」页会漏掉新接口。好处是能顺手写上每条的用途说明。
+        # endpoints 由 _route_index() 从**注册表**生成，不再手抄：手抄那份已经漂过两次
+        # （索引里留着早已删除的 /todos，同时漏掉 4 条真实存在的路由）。
         return {
             "service": "model_service",
             "flow": "Web访问 → 算法模型 → 训练 → 数据集 → 模型产物 → 推理 → (边缘设备)",
-            "endpoints": {
-                # "GET /ui"（零构建单页控制台）已删除，此处同步移除，避免索引里出现打不开的死路由
-                "GET /": "本索引（根路径，等同 /api）",
-                "GET /api": "本索引",
-                "GET /health": "服务/数据库/产物体检",
-                "GET /models": "模型清单（产物 + 库表）",
-                "GET /models/<model>": "产物 meta.json；DELETE ?version=vN 删除该版本",
-                "GET /datasets": "数据集体检（内置 .mat + 上传的表格数据集）",
-                "GET /datasets/db": "Datasets 表登记记录；POST 登记新数据集",
-                "POST /datasets/upload": "上传表格文件到 data/datasets/<名称>/（multipart，字段 name + file）",
-                "GET /datasets/table": "表格预览（列统计/前 N 行/推荐信号列，?path=）",
-                "GET /datasets/signal": "取一段原始信号（.mat 或表格，画波形用）",
-                "POST /train": "训练并落盘（model, epochs, dataset, ...）",
-                "GET /trainings": "最近训练记录（库）",
-                "POST /predict": "推理（model, samples 或 path）",
-                "GET /inference-tasks": "最近推理任务（库）",
-                "GET /inference-tasks/<id>": "任务与结果明细（库）",
-                "GET /figures": "已生成的图（训练曲线/混淆矩阵/预测分布…）",
-                "GET /figures/<路径>": "直接看某张 PNG",
-                "GET /system": "运行信息（Python/依赖版本/路径/行数/占用）",
-                "GET /system/logs": "训练日志列表；GET /system/logs/<name>?tail=N 看尾部",
-                "POST /system/maintenance": "维护操作（目前支持清空图库 target=figures）",
-                # ⚠️ 这里以前还挂着一行 "GET/POST/PUT/DELETE /todos"（"原有的示例接口，保留不动"），
-                #    但 /todos 早已随 flask_restful 官方示例一起删掉了，索引里留着它等于向使用者
-                #    承诺一个点进去必然 404 的地址。索引只列真实注册的路由（对照 register_api）。
-                "POST /models": "登记一个模型（只写 Models 表，不训练）",
-                "POST /models/upload": "上传模型（文件夹或多个文件）→ 落盘 + 登记",
-                "GET /models/<model>/references": "该模型被哪些表引用（删之前的体检）",
-                "GET /models/<model>/overview": "模型档案（登记 + 产物参数 + 最近训练 + 引用）",
-            },
+            "endpoints": _route_index(),
             # 别名表的 value 才是内部键：cnn / 算法模型1 / 模型1 等多个别名指向同一个键，所以先 set 去重
             "models": sorted(set(ALIASES.values())),
         }
@@ -1026,7 +997,7 @@ class ModelOverview(Resource):
 
 
 class ModelUpload(Resource):
-    """上传一个**模型（文件夹，或者单个/多个文件）**，落盘成 data/models/<模型名>/<版本>/ 并登记 Models 表。
+    """上传模型（文件夹，或者单个/多个文件）：落盘成 data/models/<模型名>/<版本>/ 并登记 Models 表。
 
     表单字段：`name`（模型名，必填）、`version`（可选，默认自动取下一个 vN）、
     以及多个 `file`——浏览器既可以用 `<input type="file" webkitdirectory>` 选整个文件夹，
@@ -1316,16 +1287,9 @@ class FigureFile(Resource):
 # 备注：当初路径选 /ui 而不是 /console，是因为 Flask debug=True 时 Werkzeug 调试器独占 /console。
 
 
-class Root(Resource):
-    """GET / —— 根路径直接返回接口索引，避免 127.0.0.1:5000/ 看到 404。
-
-    原先是 `redirect("/ui")`（302 跳到零构建控制台）。控制台删除后这里不能再指向死地址，
-    改为返回与 GET /api 完全一致的索引 JSON，让根路径仍然是个"有东西可看"的入口。
-    """
-
-    def get(self):
-        # 直接复用 ApiIndex 的返回，保证「根路径」和「/api」永远是同一份清单，不出现第二份手写副本
-        return ApiIndex().get()
+# 说明：原先这里还有一个 `class Root`，作用是让 `GET /` 返回与 `GET /api` 完全一样的索引
+# （`return ApiIndex().get()`）。它已删除 —— flask_restful 一个资源可以挂多个 URL，
+# 在 _ROUTES 里把 ApiIndex 同时注册到 "/" 与 "/api" 即可，少一个只为转发而存在的类。
 
 
 # ============================ 数据集管理 / 数据展示 ============================
@@ -1561,50 +1525,83 @@ class Maintenance(Resource):
         return {"error": f"不支持的维护目标：{target!r}", "supported": ["figures"]}, 400
 
 
+# ------------------------------------------------------------------ 路由表
+# 这张表是**唯一的注册清单**，同时也是 GET /（= GET /api，「接口索引」页）的数据源。
+# 加一条路由 = 在下面加一行：注册与索引不可能再脱钩。原先两边各写一份手抄清单，实际已经漂过两次
+# —— 索引里挂着早已删除的 /todos，同时漏掉 4 条真实存在的路由。
+#
+# ⚠️ 顺序有讲究，别按"好看"重排：
+#   · `/models` 出现两次是**故意的**：ModelList 只实现 GET、ModelCreate 只实现 POST，
+#     flask-restful 按 HTTP 方法分发，两者不冲突（同一路径同一方法被两个资源类实现属未定义行为，
+#     以后再加同 URL 的资源类，先确认方法不重叠）。
+#   · 含变量段的 `/models/<model_name>` 与静态段 `/models/upload`、`/models/<model_name>/references`
+#     混在一起时，更具体的静态规则必须先命中，否则 `/models/upload` 会被当成 model_name='upload'
+#     丢给 ArtifactDetail（上传接口直接 404/400）。改这里的路径写法（例如把 <model_name> 换成
+#     <path:...>）之后，务必实测 `/models/upload` 仍走 ModelUpload。
+#   · ApiIndex 一次挂两个 URL（"/" 与 "/api"）：根路径原本有个只为转发而存在的 Root 类，已删除。
+#   · ApiIndex 的 ("/", "/api") 是**一次 add_resource 挂两个 URL**：根路径原本有个只为转发而
+#     存在的 Root 类，已删除。⚠️ 不能拆成两次 add_resource —— flask_restful 用"类名小写"当
+#     endpoint，第二个同名 endpoint 会直接 AssertionError: View function mapping is overwriting
+#     an existing endpoint function。
+_ROUTES = (
+    (ApiIndex, ("/", "/api")),
+    (Health, ("/health",)),
+    (ModelList, ("/models",)),
+    (DatasetList, ("/datasets",)),
+    (Train, ("/train",)),
+    (TrainingList, ("/trainings",)),
+    (Predict, ("/predict",)),
+    (InferenceTaskList, ("/inference-tasks",)),
+    (InferenceTaskDetail, ("/inference-tasks/<int:task_id>",)),
+    (ArtifactDetail, ("/models/<model_name>",)),
+    (ModelCreate, ("/models",)),
+    (ModelUpload, ("/models/upload",)),
+    (ModelReferences, ("/models/<model_name>/references",)),
+    (ModelOverview, ("/models/<model_name>/overview",)),
+    (FigureList, ("/figures",)),
+    (FigureFile, ("/figures/<path:relpath>",)),
+    (DatasetDb, ("/datasets/db",)),
+    (DatasetSignal, ("/datasets/signal",)),
+    (DatasetUpload, ("/datasets/upload",)),
+    (TablePreview, ("/datasets/table",)),
+    (SystemInfo, ("/system",)),
+    (SystemLogs, ("/system/logs",)),
+    (SystemLogFile, ("/system/logs/<name>",)),
+    (Maintenance, ("/system/maintenance",)),
+)
+# 原先还注册过两条，已随"零调用"清理一起删除，别再往索引里补：
+#   Console → "/ui"（零构建控制台，前端已改为纯 Vue 页面）
+#   DatasetRecord → "/datasets/db/<int:dataset_id>"（单条登记行的查/改/删，前端只声明过
+#     updateDataset/deleteDataset 却没有任何页面调用；登记的写入仍在 POST /datasets/db）
+
+# GET /（及 /api）的索引里，各条路由的路径形态：把 Flask 的转换器写法换成更易读的占位符。
+# 只影响「接口索引」页的显示，不参与路由匹配。
+_PATH_DISPLAY = {"<int:task_id>": "<id>", "<path:relpath>": "<路径>", "<model_name>": "<model>", "<name>": "<名>"}
+
+
+def _route_index() -> dict[str, str]:
+    """路径 → 用途说明，直接取各 Resource 的 docstring 首行（不再手抄一份）。
+
+    同一个路径被两个资源类实现时（只有 `/models`：GET 与 POST）把两句话拼起来。
+    """
+    out: dict[str, str] = {}
+    for resource, paths in _ROUTES:
+        # docstring 首行往往自带 "GET /health —— " 前缀，而 UI 的「接口」列已经单独显示了路径，去掉它
+        desc = (resource.__doc__ or "").strip().splitlines()[0]
+        desc = re.sub(r"^(?:GET|POST|PUT|DELETE|GET/POST|GET/PUT/DELETE|GET/POST/PUT/DELETE)\s+\S+\s*——\s*", "", desc)
+        desc = desc.replace("**", "").rstrip("。")     # 去掉行内强调标记与句末句号，拼接时更干净
+        for path in paths:
+            show = path
+            for flask_form, readable in _PATH_DISPLAY.items():
+                show = show.replace(flask_form, readable)
+            out[show] = f"{out[show]}；{desc}" if show in out else desc
+    return out
+
+
 def register_api(api) -> None:
-    """把资源挂到 flask_restful.Api 上（由 main.py 调用）。"""
-    # 基础页：/ 返回接口索引（等同 /api）；/api 是自描述清单（人/脚本查有哪些接口）；/health 给探活用
-    api.add_resource(Root, "/")
-    # api.add_resource(Console, "/ui") 已删除：零构建控制台下线，不再暴露 /ui
-    api.add_resource(ApiIndex, "/api")
-    api.add_resource(Health, "/health")
-    # ⚠️ `/models` 注册了两次是**故意的**：ModelList 只实现 GET、ModelCreate 只实现 POST，
-    # flask-restful 按 HTTP 方法分发，两者不冲突。以后再加同 URL 的资源类，先确认方法不重叠
-    # （同一路径同一方法被两个资源类实现属于未定义行为，别赌哪个赢）
-    api.add_resource(ModelList, "/models")
-    api.add_resource(DatasetList, "/datasets")
-    api.add_resource(Train, "/train")
-    api.add_resource(TrainingList, "/trainings")
-    api.add_resource(Predict, "/predict")
-    api.add_resource(InferenceTaskList, "/inference-tasks")
-    api.add_resource(InferenceTaskDetail, "/inference-tasks/<int:task_id>")
-    # ⚠️ 这三条是"变量段 + 静态段"混用（/models/<model_name>、/models/upload、
-    # /models/<model_name>/references）：静态段更具体的规则必须能先命中，否则 /models/upload
-    # 会被当成 model_name='upload' 丢给 ArtifactDetail，上传接口直接 404/400。
-    # 改动这里的路径写法（例如把 <model_name> 换成 <path:...>）后，务必实测 /models/upload 仍走 ModelUpload
-    api.add_resource(ArtifactDetail, "/models/<model_name>")
-    api.add_resource(ModelCreate, "/models")
-    api.add_resource(ModelUpload, "/models/upload")
-    api.add_resource(ModelReferences, "/models/<model_name>/references")
-    api.add_resource(ModelOverview, "/models/<model_name>/overview")
-    # 说明：原先这里还注册了 DatasetRecord → "/datasets/db/<int:dataset_id>"
-    # （GET/PUT/DELETE 单条 Datasets 登记行）。全项目零调用：前端 api/platform/index.ts 里
-    # 声明过 updateDataset/deleteDataset，但没有任何页面调它们，也没有脚本/文档用它，
-    # 所以连同 db 层的 dataset_references/update_dataset/delete_dataset 一起删除。
-    # 数据集登记的**写入**仍在 POST /datasets/db（DatasetDb），未受影响。
-    api.add_resource(FigureList, "/figures")
-    # path: 转换器（而不是 string/默认）才能带子目录：图的路径形如 1dcnn/v1/xxx.png
-    api.add_resource(FigureFile, "/figures/<path:relpath>")
-    # 数据集管理 / 数据展示
-    api.add_resource(DatasetDb, "/datasets/db")
-    api.add_resource(DatasetSignal, "/datasets/signal")
-    api.add_resource(DatasetUpload, "/datasets/upload")
-    api.add_resource(TablePreview, "/datasets/table")
-    # 系统管理
-    api.add_resource(SystemInfo, "/system")
-    api.add_resource(SystemLogs, "/system/logs")
-    api.add_resource(SystemLogFile, "/system/logs/<name>")
-    api.add_resource(Maintenance, "/system/maintenance")
+    """把 _ROUTES 里的资源挂到 flask_restful.Api 上（由 main.py 调用）。"""
+    for resource, paths in _ROUTES:
+        api.add_resource(resource, *paths)
 
     # ⚠️ 收尾必须调用它：脱敏挂在 app.after_request 上，跟资源注册顺序无关，
     # 但放在这里能保证"谁用 register_api 谁就自动带上出口脱敏"——漏挂一次，所有响应都在裸奔真实路径。

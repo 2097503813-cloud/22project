@@ -315,21 +315,34 @@ _DISPATCH = {"tensorflow-keras": _predict_keras, "pytorch": _predict_torch, "adt
 
 # ------------------------------------------------------------------ 落库
 def _resolve_anchor(model_name: str, training_id: int | None) -> tuple[dict | None, int | None]:
-    """确定 InferenceTasks 的外键锚点（TrainingID，NOT NULL）。"""
+    """确定 InferenceTasks 的外键锚点（TrainingID，NOT NULL）。
+
+    两个来源：
+      · 显式传了 `training_id` → 按 ID 查；**查不到直接报错**，不静默回退到"最近一次训练"
+        （不然用户以为结果挂在指定的那次训练上，实际挂在别处）
+      · 没传 → 取该模型**最近一次成功**的训练（`latest_training` 的 only_success 默认 True）：
+        失败的训练没有可用权重，不能当锚点
+    返回 (训练行, TrainingID)；返回的 ID 为 None 表示"没有可用的成功训练"。
+    """
     from .training import db_model_name
     if training_id is not None:
         row = database.training_by_id(int(training_id))
         if row is None:
             raise DBError(f"TrainingID={training_id} 不存在")
         return row, int(training_id)
-    row = database.latest_training(db_model_name(model_name))
+    row = database.latest_training(db_model_name(model_name))   # 默认只找 Status=成功 的行
     return row, (int(row["TrainingID"]) if row else None)
 
 
 def _write_db(model_name: str, artifact, payload: dict, input_info: dict, predictions: list[dict],
               training_id: int | None, duration_ms: int, client_ip: str | None, request_params: dict,
               output_path: str | None = None) -> dict:
-    """InferenceTasks → InferenceResults（+ ModelInvocations）。"""
+    """把一次推理写进三张表：InferenceTasks（1 行）+ InferenceResults（n 行）+ ModelInvocations（1 行）。
+
+    这是"尽力而为"的写法：任何数据库异常都被收进返回值的 `written/error` 里，
+    **不让推理请求因此失败**（推理本身已经算完了，结果也已经返回给调用方）。
+    调用方/前端看 `db.written` 判断有没有落库，落库失败时 api 层还会补一个 `warning` 字段。
+    """
     from .training import db_model_name
     try:
         # 外键锚点：InferenceTasks.TrainingID 是 NOT NULL，所以"这次推理基于哪一次训练"
@@ -343,11 +356,16 @@ def _write_db(model_name: str, artifact, payload: dict, input_info: dict, predic
         source_path = input_info.get("path")
         # 内联样本没有"数据集"这一概念，但 InferenceTasks.TargetDatasetID 是 NOT NULL，
         # 所以按模型登记一条 ADHOC 数据集，避免为了满足外键去伪造真实数据集。
+        # 它是**复用**的（ensure_dataset 命中同名即返回），不会每次推理都新增一行。
         dataset_id = database.ensure_dataset(
             f"ADHOC-{model_name}", source=source_path or "内联数组(/predict samples)",
             sample_count=payload["count"], class_count=artifact.meta.get("num_classes"),
             data_path=source_path, description="推理时的临时输入登记")
 
+        # 逐窗口组一行 InferenceResults。字段分三类：
+        #   ① 分类模型共有：predicted_class / predicted_label / predicted_category / confidence / score
+        #   ② 只有 adtk 才有：is_anomaly / anomaly_score（分类模型这两列落 NULL，反之亦然）
+        #   ③ 溯源用：sample_index（窗口号）、actual_class（仅当输入是登记过的 CWRU 文件才填）
         rows = []
         for pred in predictions:
             # 先序列化再判断长度：直接按字符截（`[:500]`）会把 JSON 切成半截，落库就是坏数据

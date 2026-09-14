@@ -14,10 +14,8 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -175,7 +173,9 @@ def _predict_torch(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
     且 state_dict 的键要与该结构同构；手工上传的 .pt 结构不同就会报键不匹配。
     """
     import torch
-    mod = _import_module("cwt_cnn", "cwt_cnn_pytorch")
+    from .training import _import_project_module      # 懒导入，避免与 training 循环依赖
+    # 复用训练侧同一个导入器：cwt_cnn 的模块名没法靠包路径导入，只能先补 sys.path 再 import
+    mod = _import_project_module("cwt_cnn", "cwt_cnn_pytorch")
     input_len = int(artifact.meta.get("input_len") or matrix.shape[1])   # 缺 input_len 时按实际窗口长度
     # weights_only=False：因为要读 payload 里的 num_classes（不只是张量）。
     # ⚠️ 与 .pkl 同理，这等于对上传产物做反序列化；trusted 闸门目前只拦了 .pkl 分支，
@@ -218,70 +218,45 @@ def _predict_adtk(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
     with open(artifact.weights, "rb") as fh:
         bundle = pickle.load(fh)
 
-    if bundle.get("feature_mode") and bundle.get("transformer") is not None:       # —— 新格式产物
-        mode = str(bundle["feature_mode"])
-        rate = float(bundle.get("sampling_rate") or 48000)
-        features = matrix.astype(float) if mode == "raw" else np.asarray(
-            [adtk_window_features(window, rate) for window in matrix])
-        frame = pd.DataFrame(features, index=pd.date_range("2017-01-01", periods=features.shape[0], freq="s"))
-        scores = np.asarray(bundle["transformer"].transform(frame), dtype=float).ravel()
-        raw_threshold = bundle.get("threshold")
-        if raw_threshold is None or float(raw_threshold) <= 0:      # 阈值缺失/为 0 → 会把所有窗口都判异常
-            raise InvalidInput("产物里的 threshold 缺失或非法（<=0），请重新训练 adtk 生成完整产物")
-        threshold = float(raw_threshold)
-        base = float(bundle.get("score_median") or 0.0)
-        rows = []
-        for i, score in enumerate(scores):
-            is_anomaly = bool(score > threshold)
-            rows.append({
-                "index": i,
-                "is_anomaly": is_anomaly,
-                "anomaly_score": round(float(score), 6),
-                "predicted_class": 1 if is_anomaly else 0,
-                "predicted_label": "异常" if is_anomaly else "正常",
-                "predicted_category": "AnomalyDetection",
-                "detail": {"detector": bundle.get("detector_name"),
-                           "baseline": bundle.get("baseline_source"),
-                           "feature_mode": mode,
-                           "重构误差": round(float(score), 6),
-                           "判定阈值": round(threshold, 6),
-                           "正常分数中位": round(base, 6),
-                           "相对正常倍数": round(float(score) / (base + 1e-12), 2)},
-            })
-        return rows
+    # 判定产物格式：新格式必须同时带 feature_mode 与 transformer。
+    # ⚠️ 这里**不再**保留"老格式还能跑"的兜底分支：老格式（点级 detect + 异常点占比阈值）
+    #    在本服务里实测没有判别力（故障窗口的异常点占比反而低于正常基线，标定后全判正常），
+    #    磁盘上唯一一份产物 adtk/v2 也已是新格式（feature_mode='stats' + PcaReconstructionError），
+    #    那段代码事实上不可达。留着它的害处是：真有人塞进老 pkl 时，会按一套错误的阈值
+    #    静默给出"正常/异常"，比直接报错危险得多 —— 所以改成明确拒收。
+    if not (bundle.get("feature_mode") and bundle.get("transformer") is not None):
+        raise InvalidInput(
+            "这个 adtk 产物是老格式（点级 detect + 异常点占比），本服务已不再支持："
+            "老格式实测没有判别力，请用当前版本重新训练 adtk 生成带 feature_mode/transformer 的产物")
 
-    # —— 老格式产物（点级 detect + 异常占比）还能跑，但实测没有判别力，建议重新训练 ——
-    detector = bundle.get("detector")
-    columns = bundle.get("columns") or ["value"]
-    reference = float(bundle.get("baseline_ratio") or 0.0)
-    factor = float(bundle.get("factor") or 1.3)
-    threshold = max(reference * factor, reference + 0.02)
+    mode = str(bundle["feature_mode"])
+    rate = float(bundle.get("sampling_rate") or 48000)
+    features = matrix.astype(float) if mode == "raw" else np.asarray(
+        [adtk_window_features(window, rate) for window in matrix])
+    frame = pd.DataFrame(features, index=pd.date_range("2017-01-01", periods=features.shape[0], freq="s"))
+    scores = np.asarray(bundle["transformer"].transform(frame), dtype=float).ravel()
+    raw_threshold = bundle.get("threshold")
+    if raw_threshold is None or float(raw_threshold) <= 0:      # 阈值缺失/为 0 → 会把所有窗口都判异常
+        raise InvalidInput("产物里的 threshold 缺失或非法（<=0），请重新训练 adtk 生成完整产物")
+    threshold = float(raw_threshold)
+    base = float(bundle.get("score_median") or 0.0)
     rows = []
-    for i, window in enumerate(matrix):
-        # PcaAD 属于 multivariate 检测器：fit/detect 都要求 DataFrame，
-        # 传 Series 会抛 "Input must be a pandas DataFrame."
-        frame = pd.DataFrame({columns[0]: window},
-                             index=pd.date_range("2017-01-01", periods=len(window), freq="s"))
-        flagged = detector.detect(frame)
-        flags = np.asarray(pd.Series(flagged).fillna(False).astype(bool))
-        ratio = float(flags.mean()) if flags.size else 0.0
-        is_anomaly = bool(ratio > threshold)
+    for i, score in enumerate(scores):
+        is_anomaly = bool(score > threshold)
         rows.append({
             "index": i,
             "is_anomaly": is_anomaly,
-            "anomaly_score": round(ratio, 6),
-            "anomaly_points": int(flags.sum()),
-            "points": int(flags.size),
+            "anomaly_score": round(float(score), 6),
             "predicted_class": 1 if is_anomaly else 0,
             "predicted_label": "异常" if is_anomaly else "正常",
             "predicted_category": "AnomalyDetection",
             "detail": {"detector": bundle.get("detector_name"),
                        "baseline": bundle.get("baseline_source"),
-                       "异常点占比": round(ratio, 6),
-                       "基线参考占比": round(reference, 6),
+                       "feature_mode": mode,
+                       "重构误差": round(float(score), 6),
                        "判定阈值": round(threshold, 6),
-                       "倍数": factor,
-                       "注意": "老格式产物（点级异常占比），实测判别力很差，建议重新训练 adtk"},
+                       "正常分数中位": round(base, 6),
+                       "相对正常倍数": round(float(score) / (base + 1e-12), 2)},
         })
     return rows
 
@@ -301,18 +276,6 @@ def _classification_row(i: int, prob_row: np.ndarray, labels: list, top_k: int) 
                    "probability": round(float(prob_row[c]), 6)} for c in order],
         "detail": {"类别总数": len(labels), "第二名概率": round(float(prob_row[int(order[1])]), 6) if len(order) > 1 else None},
     }
-
-
-def _import_module(dir_name: str, module_name: str):
-    """把项目子目录塞进 sys.path 后导入模块（推理侧要复用训练时的网络定义）。
-
-    与 training._import_project_module 同源：cwt_cnn 的模块名没法靠包路径导入，
-    只能先补 sys.path 再 import。
-    """
-    d = str(config.project_dir / dir_name)
-    if d not in sys.path:
-        sys.path.insert(0, d)
-    return importlib.import_module(module_name)
 
 
 _DISPATCH = {"tensorflow-keras": _predict_keras, "pytorch": _predict_torch, "adtk": _predict_adtk}
@@ -352,7 +315,8 @@ def _write_db(model_name: str, artifact, payload: dict, input_info: dict, predic
     try:
         # 外键锚点：InferenceTasks.TrainingID 是 NOT NULL，所以"这次推理基于哪一次训练"
         # 必须能查到 —— 拿不到成功训练记录就不写库并明确回报原因，绝不伪造一个 ID。
-        training_row, anchor = _resolve_anchor(model_name, training_id)
+        # （_resolve_anchor 同时返回训练行与 TrainingID，这里只用得上 ID）
+        _, anchor = _resolve_anchor(model_name, training_id)
         if anchor is None:
             return {"written": False, "dialect": database.dialect,
                     "error": f"库中没有 {model_name} 的成功训练记录，而 InferenceTasks.TrainingID 是 NOT NULL 外键；"

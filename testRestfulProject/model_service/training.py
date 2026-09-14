@@ -18,7 +18,6 @@ import importlib
 import json
 import random
 import sys
-import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -499,8 +498,9 @@ def _train_adtk(opts: dict) -> dict:
     fit_frame, holdout_frame = frame.iloc[:split], frame.iloc[split:]
     calibrate_frame = holdout_frame if len(holdout_frame) else fit_frame
 
-    if str(config.project_dir) not in sys.path:
-        sys.path.insert(0, str(config.project_dir))
+    # 原先这里还有一段"把 project_dir 插进 sys.path"的代码，其实完全是空转：
+    # adtk 是 venv 里装的第三方包（不是项目子目录），上面 451 行就已经 import 成功了，
+    # 而 main.py 启动时早已把 project_dir 追加进 sys.path。删掉不影响任何导入路径。
     detector_cls = getattr(adtk_detector, detector_name)
     detector = detector_cls(k=k, c=c) if detector_name == "PcaAD" else detector_cls()
     detector.fit(fit_frame)

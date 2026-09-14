@@ -14,8 +14,6 @@
  "/inference-tasks/<x>",
  "/datasets",
  "/datasets/db",
- "/datasets/db/<x>",
- "/datasets/db/<x>${force ",
  "/datasets/table",
  "/datasets/signal",
  "/datasets/upload",

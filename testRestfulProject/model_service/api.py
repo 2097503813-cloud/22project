@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
 """flask_restful 接口资源（流程图里的「Web访问」盒子）。
 
-路由一览：
+⚠️ 不要再往这里手抄一份路由表：这份清单曾经只列了 11 条、而 register_api 实际注册了 27 条，
+   两边各自演化，最后连"哪些路由真的存在"都要靠读代码才知道。
+   现在**唯一的权威清单是注册处 `register_api()`**，运行中的服务还可以直接看
+   `GET /api`（ApiIndex）—— 它列的键与 register_api 一一对应，也是前端「接口索引」页的数据源。
 
-    GET  /                         接口索引（等同 /api，方便浏览器直接敲 127.0.0.1:5000/）
-    GET  /api                      接口索引
-    GET  /health                   服务 / 数据库 / 模型产物体检
-    GET  /models                   模型清单（落盘产物 + 库表登记）
-    GET  /datasets                 数据集体检（含每个文件的点数，暴露 IR014 偏短这类问题）
-    POST /train                    训练一个模型 → 落盘 + 写 Trainings
-    GET  /trainings                最近训练记录（读库）
-    POST /predict                  推理 → 写 InferenceTasks + InferenceResults
-    GET  /inference-tasks          最近推理任务（读库）
-    GET  /inference-tasks/<id>     单个任务及其结果明细（读库）
+按用途分四组（细节看各 Resource 的 docstring）：
+
+    体检    GET  /health、/datasets、/system、/system/logs
+    模型    GET  /models、/models/<name>、/models/<name>/overview、/models/<name>/references
+            POST /models（登记）、POST /models/upload（上传）、DELETE /models/<name>?version=
+    训练    POST /train、GET /trainings
+    推理    POST /predict、GET /inference-tasks、GET /inference-tasks/<id>
+    数据集  GET  /datasets/db、POST /datasets/db（登记）、POST /datasets/upload（上传）
+            GET  /datasets/table（预览）、GET /datasets/signal（取一段信号画波形）
+    图      GET  /figures、GET  /figures/<路径>、POST /system/maintenance（清空图库）
 
 约定：任何失败都返回 {"error": ...} + 合适的状态码，并把细节写进 ModelInvocations（能写库时）。
 """
@@ -304,7 +307,13 @@ class ApiIndex(Resource):
                 "GET /system": "运行信息（Python/依赖版本/路径/行数/占用）",
                 "GET /system/logs": "训练日志列表；GET /system/logs/<name>?tail=N 看尾部",
                 "POST /system/maintenance": "维护操作（目前支持清空图库 target=figures）",
-                "GET/POST/PUT/DELETE /todos": "原有的示例接口，保留不动",
+                # ⚠️ 这里以前还挂着一行 "GET/POST/PUT/DELETE /todos"（"原有的示例接口，保留不动"），
+                #    但 /todos 早已随 flask_restful 官方示例一起删掉了，索引里留着它等于向使用者
+                #    承诺一个点进去必然 404 的地址。索引只列真实注册的路由（对照 register_api）。
+                "POST /models": "登记一个模型（只写 Models 表，不训练）",
+                "POST /models/upload": "上传模型（文件夹或多个文件）→ 落盘 + 登记",
+                "GET /models/<model>/references": "该模型被哪些表引用（删之前的体检）",
+                "GET /models/<model>/overview": "模型档案（登记 + 产物参数 + 最近训练 + 引用）",
             },
             # 别名表的 value 才是内部键：cnn / 算法模型1 / 模型1 等多个别名指向同一个键，所以先 set 去重
             "models": sorted(set(ALIASES.values())),
@@ -960,20 +969,25 @@ class ModelOverview(Resource):
 
     def get(self, model_name):
         """一个模型的完整档案：登记 + 产物参数 + 最近训练 + 引用统计，一次请求给全。"""
-        # name = 库表口径（Models.ModelName）；key = 磁盘口径（小写目录名），
-        # 后者与 _artifact_key() 的算法完全一致，只是因为上面已经算过 name 才就地内联、省一次归一。
+        # name = 库表口径（Models.ModelName）；key = 磁盘口径（小写目录名）。
+        # key 直接调 _artifact_key(model_name)：它内部就是"先 _db_model_name 再在 MODEL_META 反查"，
+        # 与这里的 name 推导完全同源，原先就地内联只会多出一份要同步维护的副本。
         name = _db_model_name(model_name)
-        key = next((k for k, v in MODEL_META.items() if v["db_name"].lower() == name.lower()), name.lower())
+        key = _artifact_key(model_name)
 
         # ⚠️ 用 next(..., None) 而不是"查不到就 404"：允许"有产物但没登记"或"登记了还没训练"，
         # 档案页要能如实展示这种不一致（与 GET /models 刻意返回两份清单是同一个思路）。
         registration = next((r for r in database.models_in_db()
                              if str(r["ModelName"]).lower() == name.lower()), None)
-        versions = [a.to_dict() for a in list_artifacts(key)]
+        # ⚠️ list_artifacts() 会真的去遍历目录并逐个读 meta.json，是磁盘 IO，只调一次：
+        #    原先这里先 `[... for a in list_artifacts(key)]` 再 `list_artifacts(key)[-1]`，
+        #    同一个请求把每个版本目录读了两遍（模型版本一多，档案页的耗时直接翻倍）。
+        artifacts = list_artifacts(key)
+        versions = [a.to_dict() for a in artifacts]
         params, metrics, labels, dataset, confusion = {}, {}, None, None, None
         if versions:
             # versions 是从旧到新排列，所以 [-1] 才是**最新版本**，参数一律取最新那份
-            meta = list_artifacts(key)[-1].meta          # 最新版本
+            meta = artifacts[-1].meta                     # 最新版本
             params = meta.get("params") or {}
             metrics = meta.get("metrics") or {}
             labels = meta.get("labels")
@@ -1026,7 +1040,6 @@ class ModelUpload(Resource):
     def post(self):
         """接收文件夹或若干文件，探测→落盘→登记 Models 表。"""
         import shutil
-        import numpy as np
         from .registry import _VERSION_RE, next_version_dir
 
         name = (request.form.get("name") or "").strip()
@@ -1115,7 +1128,9 @@ class ModelUpload(Resource):
                     "task": "classification" if weights[1] != "adtk" else "anomaly_detection",
                     "input_len": input_len, "num_classes": num_classes or (len(labels) or None),
                     "labels": labels or None, "weights_file": weights[0],
-                    "scaler_file": scaler if scaler else (Path("scaler.npz").name if (target / "scaler.npz").is_file() else None),
+                    # scaler 只在收到名为 scaler.npz 的文件时才被置位（见上面的落盘循环），
+                    # 而 target 是全新的版本目录，所以"没收到就是没有"——不需要再去磁盘上探一次
+                    "scaler_file": "scaler.npz" if scaler else None,
                     "params": {"source": "uploaded"}, "metrics": {},
                     "dataset": {"name": request.form.get("dataset") or None, "path": None, "stats": {}},
                     "trained_at": None, "uploaded_at": datetime.now().isoformat(timespec="seconds"),
@@ -1220,47 +1235,6 @@ class ModelReferences(Resource):
             # ⚠️ db 层遇到"这个名字不在 Models 表里"是抛 DBError 的，这里统一映射成 404：
             # 对调用方来说"模型不存在"属于资源不存在，不是服务故障
             return {"error": str(exc)}, 404
-
-
-class DatasetRecord(Resource):
-    """GET/PUT/DELETE /datasets/db/<dataset_id> —— 单条 Datasets 记录（查/改/删）。"""
-
-    def put(self, dataset_id):
-        # ⚠️ 路由是 <int:dataset_id>，Werkzeug 已经把它转成整数了，这里的转换只是防御性写法。
-        # ⚠️ 但原来直接写 int(dataset_id)：真抛 ValueError（非整数）时项目里**没有**全局的
-        #   InvalidInput/ValueError 处理器（InvalidInput 只是 ValueError 子类），会变成 500。
-        #   改用 _int()（转不动抛 InvalidInput）并就地接住回 400，前提是**不改动正常路径**：
-        #   _int() 只做 int(value)，不像 `int(x) or None` 那样把合法的 0 当成"没传"。
-        try:
-            dataset_id = _int(dataset_id, None, "dataset_id")
-        except InvalidInput as exc:
-            return {"error": str(exc)}, 400
-        try:
-            return database.update_dataset(dataset_id, _body()), 200
-        except DBError as exc:
-            # 改不动通常是库侧的约束问题（唯一键冲突、字段超长），属于"请求与现状冲突" → 409
-            return {"error": str(exc)}, 409
-
-    def delete(self, dataset_id):
-        """删登记行；被 Trainings/InferenceTasks 引用时默认拒绝，?force=true 才连带清理。"""
-        # ⚠️ force 这类"危险开关"的默认值必须是安全侧：只有明确写 1/true/True 才算开，
-        # 拼错（yes/on/TRUE）一律按"不加 force"处理，宁可让用户重试也别误删引用行
-        force = request.args.get("force") in ("1", "true", "True")
-        try:
-            return database.delete_dataset(int(dataset_id), force=force), 200
-        except DBError as exc:
-            # 409 = 还被别的表引用着：先把引用清掉（或显式 force）再来删
-            return {"error": str(exc)}, 409
-
-    def get(self, dataset_id):
-        """取单条 Datasets 记录（没有按主键查的接口，这里在列表里找）。"""
-        # ⚠️ 逐行线性查找，因为 database 层没提供"按 DatasetID 查单行"的函数。
-        # ⚠️ 而且 datasets_in_db() 自带默认 LIMIT 200，所以第 200 条之后的登记行这里**查不到**、
-        #    会误报 404 —— 要让这个接口真正可靠，得在 db 层补一个按主键查询
-        for row in database.datasets_in_db():
-            if int(row["DatasetID"]) == int(dataset_id):
-                return row, 200
-        return {"error": f"DatasetID={dataset_id} 不存在"}, 404
 
 
 class FigureList(Resource):
@@ -1570,7 +1544,11 @@ def register_api(api) -> None:
     api.add_resource(ModelUpload, "/models/upload")
     api.add_resource(ModelReferences, "/models/<model_name>/references")
     api.add_resource(ModelOverview, "/models/<model_name>/overview")
-    api.add_resource(DatasetRecord, "/datasets/db/<int:dataset_id>")
+    # 说明：原先这里还注册了 DatasetRecord → "/datasets/db/<int:dataset_id>"
+    # （GET/PUT/DELETE 单条 Datasets 登记行）。全项目零调用：前端 api/platform/index.ts 里
+    # 声明过 updateDataset/deleteDataset，但没有任何页面调它们，也没有脚本/文档用它，
+    # 所以连同 db 层的 dataset_references/update_dataset/delete_dataset 一起删除。
+    # 数据集登记的**写入**仍在 POST /datasets/db（DatasetDb），未受影响。
     api.add_resource(FigureList, "/figures")
     # path: 转换器（而不是 string/默认）才能带子目录：图的路径形如 1dcnn/v1/xxx.png
     api.add_resource(FigureFile, "/figures/<path:relpath>")

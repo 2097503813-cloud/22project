@@ -53,9 +53,9 @@ export const platformApi = {
 	datasets: () => request({ url: '/datasets', method: 'get' }),
 	datasetDb: () => request({ url: '/datasets/db', method: 'get' }),
 	registerDataset: (data: any) => request({ url: '/datasets/db', method: 'post', data }),
-	updateDataset: (id: number, data: any) => request({ url: `/datasets/db/${id}`, method: 'put', data }),
-	deleteDataset: (id: number, force = false) =>
-		request({ url: `/datasets/db/${id}${force ? '?force=true' : ''}`, method: 'delete' }),
+	// 原先这里还声明了 updateDataset(id, data) / deleteDataset(id, force)，对应后端的
+	// PUT/DELETE /datasets/db/<id>。两者从来没有被任何页面调用过，后端那组路由也已删除，
+	// 留着只会让人以为"登记信息可以改/可以删"。要改登记就重新 registerDataset（幂等）。
 	tablePreview: (path: string, rows = 20, column = '') =>
 		request({ url: `/datasets/table?${q({ path, rows, column })}`, method: 'get' }),
 	signal: (params: { dataset: string; file: string; column?: string; points?: number; start?: number }) =>

@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """数据库写入层：按外键顺序把「训练」和「推理」写进 8 张表。
 
-外键顺序（sql/schema.sql 与 schema_mysql.sql 已排好，这里严格照做）：
+外键顺序（唯一的建表脚本 sql/schema_mysql.sql 已排好，这里严格照做）：
 
     ① Datasets ─┐
                 ├─▶ ② Models ─▶ ③ Trainings ─┬─▶ ④ ModelInvocations（调用日志）
     ② Models  ──┘                            └─▶ ⑤ InferenceTasks ─▶ ⑥ InferenceResults
                                                    （另需 TargetDatasetID→①、ModelID→②）
 
-关于 schema.sql 末尾自己标注的悬案「InferenceTasks.TrainingID 与 DeploymentID 谁为权威锚点」，
+关于"「InferenceTasks.TrainingID 与 DeploymentID 谁为权威锚点」"这个老悬案
+（它原先记在被删掉的 T-SQL 版 sql/schema.sql 末尾，现把结论落在代码这边），
 这里的选择是：**TrainingID 为权威锚点**——推理结果的可信度取决于"哪一次训练"，部署只是
 同一次训练的投放位置。因此本服务写库时 DeploymentID / DeviceID 留空（NULL），等「边缘设备」
 那条支线真正落地后再回填。
@@ -29,7 +30,6 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from pathlib import Path
 
 from .config import config
 
@@ -134,7 +134,6 @@ class Database:
         复用而不是"每请求新建"：一次 MySQL 握手 + 认证是实打实的开销，早期那种写法是接口变慢的来源之一。
         ⚠️ 缓存必须连 require_db 一起比对：master 连接没执行过 USE，拿它跑业务 SQL 会直接 "No database selected"。
         """
-        cfg = self.cfg
         cached = getattr(self._local, "conn", None)
         # 缓存的连接必须与本次的 require_db 一致：连到 master 的连接不能拿去做业务查询
         if cached is not None and getattr(self._local, "req_db", None) == require_db:
@@ -403,25 +402,14 @@ class Database:
             ))
         return len(rows)
 
-    def insert_inference_task(self, **kwargs) -> int:
-        """⑤ 单独写一条 InferenceTasks（推理落库请改用 insert_task_with_results，保证任务与结果同事务）。"""
-        self.ensure_schema()
-        with self.cursor(commit=True) as cur:
-            return self._insert_task_cur(cur, **kwargs)
-
-    def insert_inference_results(self, task_id: int, rows: list[dict]) -> int:
-        """⑥ 单独写 InferenceResults 明细（会补写 task_id 已存在的那条任务，注意别在新流程里用）。"""
-        self.ensure_schema()
-        with self.cursor(commit=True) as cur:
-            return self._insert_results_cur(cur, task_id, rows)
-
     def insert_task_with_results(self, task_kwargs: dict, rows: list[dict]) -> tuple[int, int]:
         """⑤+⑥ **同一个事务**写完任务与全部结果，返回 (task_id, 结果行数)。
 
         存在的意义：以前是两次独立 commit，结果插入一旦失败，任务行已经按 `Status=成功、Progress=100`
         提交掉了，留下一个"有任务、没结果"的孤儿任务——前端明细点开是空的，日志里还写着成功。
         现在共用一个 cursor（=一个事务），结果失败会连带任务一起 rollback，要么都成功、要么都没写。
-        所以推理落库**只走这个入口**，insert_inference_task 只留给"任务与结果天然分开"的场景。
+        所以推理落库**只走这个入口**：原先还并列着 insert_inference_task / insert_inference_results
+        两个"单独写一半"的公开方法，全项目零调用，已删除，免得有人以为落库有第二条路径。
         """
         self.ensure_schema()
         with self.cursor(commit=True) as cur:
@@ -587,11 +575,10 @@ class Database:
             description=kwargs.get("description"))
         return {"DatasetID": dataset_id, "already_existed": existed, "DatasetName": name}
 
-    # ------------------------------------------------------ 模型/数据集 CRUD
-    # 可被 update_model / update_dataset 改的列白名单——SQL 里 set 的列名只能从这两个元组来，
+    # ------------------------------------------------------ 模型 CRUD
+    # 可被 update_model 改的列白名单——SQL 里 set 的列名只能从这个元组来，
     # 外部传进来的键名一律不当列名用，否则就是一条"任意列名拼进 SQL"的注入面
     _MODEL_FIELDS = ("Description", "ModelType", "ApiEndpoint", "Status", "IsActive")
-    _DATASET_FIELDS = ("Source", "SampleCount", "ClassCount", "DataPath", "Description")
     # 改名时要一起改的"路径"列（表名 → 列名）：模型改名后磁盘目录跟着改名，
     # 库里这些列存的是旧目录下的绝对/相对路径，不一起换掉，列表页会显示成"产物丢失"
     _PATH_FIELDS = (("Trainings", ("ModelPath",)), ("InferenceTasks", ("InputPath", "OutputPath")),
@@ -733,76 +720,11 @@ class Database:
             cur.execute(f"DELETE FROM Models WHERE ModelID = {self.placeholder}", (mid,))
         return {"deleted": name, "cascaded": bool(force and refs["total"]), "references": refs["references"]}
 
-    def dataset_references(self, dataset_id: int) -> dict:
-        """某数据集被哪些表引用了多少行（删数据集前先看这个）。
-
-        和 model_references 同构：先确认行存在（不存在就抛 DBError），再逐表 COUNT。
-        引用只有两处：Trainings.DatasetID（拿它当学习数据）与 InferenceTasks.TargetDatasetID（拿它当推理对象）。
-        返回 DatasetName 是为了让上层的报错信息能直接说人话（"数据集 CWRU-0HP 仍被引用"）。
-        """
-        self.ensure_schema()
-        with self.cursor() as cur:
-            cur.execute(f"SELECT DatasetID, DatasetName FROM Datasets WHERE DatasetID = {self.placeholder}", (dataset_id,))
-            row = cur.fetchone()
-            if not row:
-                raise DBError(f"DatasetID={dataset_id} 不存在")
-            # 只有两处引用：训练记录的学习数据、推理任务的目标数据
-            refs = {
-                "Trainings": self._count(cur, f"SELECT COUNT(*) FROM Trainings WHERE DatasetID = {self.placeholder}", (dataset_id,)),
-                "InferenceTasks": self._count(cur, f"SELECT COUNT(*) FROM InferenceTasks WHERE TargetDatasetID = {self.placeholder}", (dataset_id,)),
-            }
-            return {"DatasetID": int(row[0]), "DatasetName": row[1], "references": refs,
-                    "total": sum(refs.values()), "deletable": sum(refs.values()) == 0}
-
-    def update_dataset(self, dataset_id: int, fields: dict) -> dict:
-        """按要求改 Datasets 的列（只认白名单字段，避免把任意列名拼进 SQL）。
-
-        DatasetName 单独处理：它不在 _DATASET_FIELDS 里，但有唯一约束需要判重。
-        其余字段来自 _DATASET_FIELDS 白名单，值全部走占位符，不改代码结构就不会有注入面。
-        ⚠️ rowcount == 0 会抛 DBError，但 MySQL 在"值与原值完全相同"时 rowcount 也是 0，
-        所以这条报错有两种含义（不存在 / 值没变），提示语里写明了这一点。
-        """
-        self.ensure_schema()
-        sets, params = [], []
-        for col in self._DATASET_FIELDS:
-            if col in fields and fields[col] is not None:
-                sets.append(f"{col} = {self.placeholder}")
-                params.append(_clip(fields[col], 500))
-        if "DatasetName" in fields and fields["DatasetName"]:
-            sets.append(f"DatasetName = {self.placeholder}")
-            params.append(_clip(fields["DatasetName"], 100))
-        if not sets:
-            raise DBError("没有可更新的字段")
-        params.append(dataset_id)
-        with self.cursor(commit=True) as cur:
-            cur.execute(f"UPDATE Datasets SET {', '.join(sets)} WHERE DatasetID = {self.placeholder}", tuple(params))
-            if cur.rowcount == 0:
-                raise DBError(f"DatasetID={dataset_id} 更新失败（不存在或值未变化）")
-        return {"updated": dataset_id, "fields": [s.split(" =")[0] for s in sets]}
-
-    def delete_dataset(self, dataset_id: int, force: bool = False) -> dict:
-        """删 Datasets 登记行。有引用时默认拒绝，force=True 才连带清理。
-
-        注意与删模型不同：这里**不能**直接删掉 Trainings（那是历史记录），
-        而是把 Trainings.DatasetID 置空，只清理属于该数据集的推理任务与结果。
-        顺序同样是先子后父：结果 ← 任务（子查询一条删掉）→ 任务 → 数据集；
-        先删结果再删任务，中间不会留下"任务还在、明细已空"的状态给前端看到。
-        """
-        self.ensure_schema()
-        refs = self.dataset_references(dataset_id)
-        if refs["total"] and not force:
-            raise DBError(f"数据集 {refs['DatasetName']} 仍被引用（{refs['references']}），"
-                          f"先清理或改用 force=true")
-        with self.cursor(commit=True) as cur:
-            if force:
-                cur.execute(f"UPDATE Trainings SET DatasetID = NULL WHERE DatasetID = {self.placeholder}", (dataset_id,))
-                cur.execute("DELETE FROM InferenceResults WHERE InferenceTaskID IN "
-                            f"(SELECT InferenceTaskID FROM InferenceTasks WHERE TargetDatasetID = {self.placeholder})",
-                            (dataset_id,))
-                cur.execute(f"DELETE FROM InferenceTasks WHERE TargetDatasetID = {self.placeholder}", (dataset_id,))
-            cur.execute(f"DELETE FROM Datasets WHERE DatasetID = {self.placeholder}", (dataset_id,))
-        return {"deleted": refs["DatasetName"], "DatasetID": dataset_id,
-                "cascaded": bool(force and refs["total"])}
+    # 说明：原先这里还有 dataset_references / update_dataset / delete_dataset 三个方法
+    # （对应 GET/PUT/DELETE /datasets/db/<id>）。三者全项目零调用——前端只在
+    # api/platform/index.ts 里声明过 updateDataset/deleteDataset 两个方法，没有任何页面调它们，
+    # 路由本身也从来只是"登记的补录入口"，所以整组一并删除。
+    # 数据集登记的**写入**仍走 POST /datasets/db，对应下面的 ensure_dataset()。
 
     def table_counts(self, max_age: float = 30.0) -> dict:
         """8 张表的行数。**带 30 秒缓存**——/health 与 /system 每次都要它，而 8 条 COUNT(*) 在

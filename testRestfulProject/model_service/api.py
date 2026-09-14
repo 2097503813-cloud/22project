@@ -1224,12 +1224,17 @@ class DatasetRecord(Resource):
     """GET/PUT/DELETE /datasets/db/<dataset_id> —— 单条 Datasets 记录（查/改/删）。"""
 
     def put(self, dataset_id):
-        # ⚠️ 路由是 <int:dataset_id>，Werkzeug 已经把它转成整数了，这里的 int() 只是防御性写法。
-        # 注意它真要抛 ValueError（非整数）时项目里**没有**全局的 InvalidInput/ValueError 处理器
-        #（InvalidInput 只是 ValueError 的子类），不会被自动翻译成 400，而是直接变成 500。
-        # ⚠️ 也千万别改成 `int(dataset_id) or None` 之类——0 是 falsy，会把主键 0 当成"没传"
+        # ⚠️ 路由是 <int:dataset_id>，Werkzeug 已经把它转成整数了，这里的转换只是防御性写法。
+        # ⚠️ 但原来直接写 int(dataset_id)：真抛 ValueError（非整数）时项目里**没有**全局的
+        #   InvalidInput/ValueError 处理器（InvalidInput 只是 ValueError 子类），会变成 500。
+        #   改用 _int()（转不动抛 InvalidInput）并就地接住回 400，前提是**不改动正常路径**：
+        #   _int() 只做 int(value)，不像 `int(x) or None` 那样把合法的 0 当成"没传"。
         try:
-            return database.update_dataset(int(dataset_id), _body()), 200
+            dataset_id = _int(dataset_id, None, "dataset_id")
+        except InvalidInput as exc:
+            return {"error": str(exc)}, 400
+        try:
+            return database.update_dataset(dataset_id, _body()), 200
         except DBError as exc:
             # 改不动通常是库侧的约束问题（唯一键冲突、字段超长），属于"请求与现状冲突" → 409
             return {"error": str(exc)}, 409
@@ -1261,7 +1266,12 @@ class FigureList(Resource):
 
     def get(self):
         # 先按大 limit 取回来再按 model 过滤，避免"过滤后不足 limit 条"这种别扭语义
-        limit = min(_int(request.args.get("limit"), 60, "limit") or 60, 500)
+        # ⚠️ `_int()` 转不动会抛 InvalidInput（ValueError 子类），而项目没有全局异常处理器，
+        #    不接住 ?limit=abc 就会变成 500；这里包一层回 400，`or 60` 的 falsy 语义保持原样。
+        try:
+            limit = min(_int(request.args.get("limit"), 60, "limit") or 60, 500)
+        except InvalidInput as exc:
+            return {"error": str(exc)}, 400
         model = request.args.get("model")
         # ⚠️ list_figures 内部是"按 mtime 倒序遍历 + 到 limit 就 break"，先截断后过滤会漏：
         # 某个模型的图可能排在 500 名之后，所以这里固定取满 500 再筛。

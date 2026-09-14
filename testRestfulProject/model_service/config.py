@@ -120,7 +120,6 @@ class Config:
         self.log_dir = LOG_DIR
         self.upload_dir = UPLOAD_DIR
         self.sql_dir = SQL_DIR
-        self.sqlite_path = SQLITE_PATH
         self.dataset_dirs = dict(DATASET_DIRS)
         self.adtk_dataset_dir = ADTK_DATASET_DIR
 
@@ -162,7 +161,7 @@ class Config:
     def describe(self) -> dict:
         """给 /health 与前端「运行信息」用的配置摘要。
 
-        注意 sqlite 方言下不返回 host/port（没有意义），数据库那栏直接给本地文件路径。
+        数据库连接信息（只用 MySQL；账号密码放 db.env，不入库）。
         """
         return {
             "project_dir": str(self.project_dir),

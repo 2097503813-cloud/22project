@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """数据库写入层：按外键顺序把「训练」和「推理」写进 8 张表。
 
 外键顺序（sql/schema.sql 与 schema_mysql.sql 已排好，这里严格照做）：
@@ -13,10 +13,9 @@
 同一次训练的投放位置。因此本服务写库时 DeploymentID / DeviceID 留空（NULL），等「边缘设备」
 那条支线真正落地后再回填。
 
-三种方言：
-    sqlite     开发兜底，零配置，用 sql/schema_sqlite.sql 建镜像表
-    mysql      走 pymysql，执行 sql/schema_mysql.sql（脚本自带 CREATE DATABASE + USE）
-    sqlserver  走 pyodbc，执行 sql/schema.sql（按 GO 分批；库不存在则先在 master 里建）
+数据库：**只用 MySQL**（pymysql）。早期为"没装库也能跑"写过 SQLite 兜底与 SQL Server(pyodbc)
+两条分支，三套方言各自演化出占位符 / LIMIT-TOP / 建表脚本 / 取主键 等一堆差异，维护成本远大于
+收益，现已统一：连接参数见 db.env，建表脚本只有 sql/schema_mysql.sql（自带 CREATE DATABASE + USE）。
 
 写库失败一律抛 DBUnavailable / DBError，由上层决定「降级但显式回报」，不允许静默吞掉。
 """
@@ -56,7 +55,7 @@ def _strip_sql_comments(text: str) -> str:
 
 
 def _statements(sql: str) -> list[str]:
-    """把建表脚本切成一条条可执行的 SQL（MySQL 用；T-SQL 走 GO 分批，见 ensure_schema）。"""
+    """把建表脚本切成一条条可执行的 SQL（按分号切，切之前先去掉注释，避免注释里的分号捣乱）。"""
     return [s.strip() for s in _strip_sql_comments(sql).split(";") if s.strip()]
 
 
@@ -70,9 +69,9 @@ def _clip(value, limit: int):
 def _jsonable(value):
     """把驱动返回的对象转成可 JSON 序列化的值。
 
-    SQLite 返回的是字符串，而 MySQL(pymysql) 会返回 datetime、SQL Server(pyodbc)
-    还可能返回 Decimal/bytes——回读接口必须统一，否则 Flask 的 json 编码器会直接报
-    "Object of type datetime is not JSON serializable"。
+    pymysql 读 DATETIME 列会返回 datetime 对象、读 DECIMAL 会返回 Decimal、读 BLOB 会返回
+    bytes —— 直接塞进 Flask 的 jsonify 会报 "Object of type datetime is not JSON serializable"。
+    所有回读接口都必须先过这里（`/trainings` 曾经 500 就是漏了这一步）。
     """
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")

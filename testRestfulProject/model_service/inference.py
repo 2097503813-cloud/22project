@@ -123,43 +123,54 @@ def _apply_scaler(artifact, matrix: np.ndarray) -> np.ndarray:
     测试集准确率 0.83 的模型，对原始信号窗口的预测全是错的）。
     """
     scaler_file = artifact.meta.get("scaler_file")
+    # ⚠️ 下面两个 return 都是**静默跳过标准化**：meta 里没记 scaler_file（老产物/手工上传没带
+    #    scaler.npz），或文件被删了。此时分类结果会系统性出错但接口不报错 ——
+    #    换数据/换产物前，务必确认版本目录里 scaler.npz 还在。
     if not scaler_file:
         return matrix
     path = artifact.directory / scaler_file
     if not path.is_file():
         return matrix
-    with np.load(path) as npz:
+    with np.load(path) as npz:          # scaler.npz 里就两个数组：训练集的均值与标准差
         mean, scale = npz["mean"], npz["scale"]
-    return (matrix - mean) / scale
+    return (matrix - mean) / scale      # 与训练时同一套 (x-μ)/σ，逐点对齐
 
 
 def _predict_keras(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
     """tensorflow-keras 路线：喂 (n, length, 1)，输出 softmax 概率后取 top_k。"""
     import tensorflow.keras as keras
-    model = keras.models.load_model(artifact.weights)
-    scaled = _apply_scaler(artifact, matrix)
+    model = keras.models.load_model(artifact.weights)   # .h5 与 .keras 都能读，所以这里无需分支
+    scaled = _apply_scaler(artifact, matrix)            # 必须先标准化，原因见 _apply_scaler
     # 用「实际窗口长度」兜底：上传的模型可能没有 input_len，直接下标会 KeyError → 500
     length = int(artifact.meta.get("input_len") or matrix.shape[1])
-    probs = model.predict(scaled.reshape(-1, length, 1), verbose=0)
+    probs = model.predict(scaled.reshape(-1, length, 1), verbose=0)   # (n, length, 1)：通道在最后
+    # 类别表缺失时退化成 class_0/class_1…（仍给出可读类别名，不至于整行空白）
     labels = artifact.meta.get("labels") or [f"class_{i}" for i in range(probs.shape[1])]
     return [_classification_row(i, probs[i], labels, top_k) for i in range(len(probs))]
 
 
 def _predict_torch(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
-    """pytorch 路线：按 meta 里的 num_classes/length 重建网络，加载 state_dict 后前向。"""
+    """pytorch 路线：按 meta 里的 num_classes/length 重建网络，加载 state_dict 后前向。
+
+    这条路**只对"用本服务训练出来的" .pt 有效**：脚本里的 build_model 必须存在，
+    且 state_dict 的键要与该结构同构；手工上传的 .pt 结构不同就会报键不匹配。
+    """
     import torch
     mod = _import_module("cwt_cnn", "cwt_cnn_pytorch")
     input_len = int(artifact.meta.get("input_len") or matrix.shape[1])   # 缺 input_len 时按实际窗口长度
+    # weights_only=False：因为要读 payload 里的 num_classes（不只是张量）。
+    # ⚠️ 与 .pkl 同理，这等于对上传产物做反序列化；trusted 闸门目前只拦了 .pkl 分支，
+    #    上传的 .pt 走这条路仍有风险，属于已知待办。
     payload = torch.load(artifact.weights, map_location="cpu", weights_only=False)
     model = mod.build_model(num_classes=payload.get("num_classes", artifact.meta.get("num_classes") or 10),
-                           length=input_len)
+                           length=input_len)     # 结构必须与保存时同构，否则 load_state_dict 报键不匹配
     model.load_state_dict(payload["state_dict"])
-    model.eval()
+    model.eval()                                 # 关掉 dropout / BN 的训练态行为
     scaled = _apply_scaler(artifact, matrix)
-    x = torch.tensor(scaled.reshape(-1, 1, input_len), dtype=torch.float32)
-    with torch.no_grad():
+    x = torch.tensor(scaled.reshape(-1, 1, input_len), dtype=torch.float32)   # (n, 1, length)：通道在最前
+    with torch.no_grad():                        # 推理不需要梯度，省内存也更快
         logits = model(x)
-        probs = torch.softmax(logits, dim=1).numpy()
+        probs = torch.softmax(logits, dim=1).numpy()     # logits → 概率，与 Keras 分支对齐
     labels = artifact.meta.get("labels") or [f"class_{i}" for i in range(probs.shape[1])]
     return [_classification_row(i, probs[i], labels, top_k) for i in range(len(probs))]
 

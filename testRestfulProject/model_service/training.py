@@ -164,6 +164,8 @@ def _train_1dcnn(opts: dict) -> dict:
     import tensorflow.keras as keras
     _seed_everything(seed)
 
+    # 三个数据集从 (n, length) 变成 (n, length, 1)：Conv1D 要求最后一维是通道数，
+    # 而振动信号只有 1 个通道。astype("float32") 与 Keras 默认精度对齐（用 float64 会慢近一倍）。
     x_train = data["X_train"].reshape(-1, length, 1).astype("float32")
     x_valid = data["X_valid"].reshape(-1, length, 1).astype("float32")
     x_test = data["X_test"].reshape(-1, length, 1).astype("float32")
@@ -176,13 +178,18 @@ def _train_1dcnn(opts: dict) -> dict:
                          f"而当前数据集有 {len(data['labels'])} 类；请改用 cwt_cnn，"
                          f"或把 1DCNN/1DCNN.py 的输出层改成按类别数动态生成")
 
+    # 网络结构**直接复用原项目脚本**（importlib 导入 mod.mymodel），保证与既有实验结果同源；
+    # 代价是它把输出层写死 10 类，所以上面那道守卫不能删。
     model = mod.mymodel(x_train)
+    # 多分类标配：Adam + 稀疏类别交叉熵（标签是 0..9 的整数下标，不需要先做 one-hot）
     model.compile(optimizer=keras.optimizers.Adam(),
                   loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    # 训练：verbose=1 的进度条会写进本次的日志文件；validation_data 用切出来的 valid 集
     history = model.fit(x_train, data["y_train"], batch_size=batch_size, epochs=epochs,
                         verbose=1, validation_data=(x_valid, data["y_valid"]))
+    # 评估用**测试集**（训练与验证都没碰过），结果记进 meta.metrics.test_accuracy/test_loss
     scores = model.evaluate(x_test, data["y_test"], verbose=0)
-    y_pred = np.argmax(model.predict(x_test, verbose=0), axis=1)
+    y_pred = np.argmax(model.predict(x_test, verbose=0), axis=1)   # 取最大概率的下标当预测类别
     from sklearn.metrics import classification_report, confusion_matrix
     report = classification_report(data["y_test"], y_pred, digits=4, zero_division=0)
     per_class = classification_report(data["y_test"], y_pred, digits=4, zero_division=0, output_dict=True)

@@ -189,6 +189,7 @@ class Database:
         if self._schema_ready:
             return
 
+        # 只用 MySQL：执行 schema_mysql.sql（库不存在就顺手建；脚本可重复执行）
         sql = (self.cfg.sql_dir / "schema_mysql.sql").read_text(encoding="utf-8")
         try:
             conn = self._connect()                      # 库已存在
@@ -196,35 +197,12 @@ class Database:
             conn = self._connect(require_db=False)      # 库还不存在：脚本里有 CREATE DATABASE + USE
             self.last_bootstrap = f"MySQL 库 {self.cfg.db_name} 由 schema_mysql.sql 顺手创建"
         try:
-                cur = conn.cursor()
-                for stmt in _statements(sql):
-                    cur.execute(stmt)
-                conn.commit()
-            finally:
-                conn.close()
-
-        else:
-            sql = (self.cfg.sql_dir / "schema.sql").read_text(encoding="utf-8")
-            batches = [b.strip() for b in re.split(r"^\s*GO\s*$", _strip_sql_comments(sql), flags=re.M | re.I) if b.strip()]
-            try:
-                conn = self._connect()
-            except DBUnavailable:
-                boot = self._connect(require_db=False)
-                try:
-                    boot.autocommit = True
-                    boot.cursor().execute(
-                        f"IF DB_ID(N'{self.cfg.db_name}') IS NULL CREATE DATABASE [{self.cfg.db_name}]")
-                    self.last_bootstrap = f"SQL Server 库 {self.cfg.db_name} 由服务顺手创建"
-                finally:
-                    boot.close()
-                conn = self._connect()
-            try:
-                cur = conn.cursor()
-                for batch in batches:
-                    cur.execute(batch)
-                conn.commit()
-            finally:
-                conn.close()
+            cur = conn.cursor()
+            for stmt in _statements(sql):
+                cur.execute(stmt)
+            conn.commit()
+        finally:
+            conn.close()
 
         self._schema_ready = True
 
@@ -234,22 +212,16 @@ class Database:
             self.ensure_schema()
             counts = self.table_counts()
             return {"ok": True, "dialect": self.dialect, "counts": counts,
-                    "target": str(self.cfg.sqlite_path) if self.dialect == "sqlite"
-                    else f"{self.cfg.db_host}:{self.cfg.db_port}/{self.cfg.db_name}",
+                    "target": f"{self.cfg.db_host}:{self.cfg.db_port}/{self.cfg.db_name}",
                     "bootstrap": self.last_bootstrap}
         except Exception as exc:
             return {"ok": False, "dialect": self.dialect, "error": str(exc),
-                    "target": str(self.cfg.sqlite_path) if self.dialect == "sqlite"
-                    else f"{self.cfg.db_host}:{self.cfg.db_port}/{self.cfg.db_name}"}
+                    "target": f"{self.cfg.db_host}:{self.cfg.db_port}/{self.cfg.db_name}"}
 
     # ------------------------------------------------------------------ 写入
     def _insert_returning_id(self, cur, sql: str, params: tuple) -> int:
-        """执行 INSERT 并返回自增主键。"""
+        """执行 INSERT 并返回自增主键（MySQL 直接用 cursor.lastrowid）。"""
         cur.execute(sql, params)
-        # SQL Server 没有 lastrowid，要单独取 SCOPE_IDENTITY()（限定当前作用域，避免取到别处的 identity）
-        if self.dialect == "sqlserver":
-            cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
-            return int(cur.fetchone()[0])
         return int(cur.lastrowid)
 
     def _ph(self, n: int) -> str:

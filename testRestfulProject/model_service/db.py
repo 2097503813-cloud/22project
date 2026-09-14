@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """数据库写入层：按外键顺序把「训练」和「推理」写进 8 张表。
 
 外键顺序（sql/schema.sql 与 schema_mysql.sql 已排好，这里严格照做）：
@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -45,7 +44,7 @@ class DBUnavailable(DBError):
 
 
 def _now() -> str:
-    """统一时间戳格式：MySQL / SQL Server / SQLite 都能解析的字符串。"""
+    """统一时间戳格式：MySQL 能解析的字符串。"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 

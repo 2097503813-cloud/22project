@@ -23,7 +23,11 @@ Web服务器 ─▶ flask_restful 接口(Web访问) ─┬─▶ 算法模型1(1
 | GET | `/api` | 接口索引 |
 | GET | `/health` | 服务 / 数据库 / 产物体检 |
 | GET | `/models` | 落盘产物 + 库表登记的模型清单 |
+| POST | `/models` | 登记一个模型（只写 `Models` 表，不训练、不落产物） |
+| POST | `/models/upload` | 上传模型（文件夹或多个文件）→ 探测 → 落盘 → 登记 |
 | GET | `/models/<name>` | 产物 meta.json 全文；`DELETE ?version=vN` 删除该版本（危险） |
+| GET | `/models/<name>/references` | 该模型被哪些表引用了多少行（删之前的体检） |
+| GET | `/models/<name>/overview` | 模型档案（登记 + 产物参数 + 最近训练 + 引用统计） |
 | GET | `/datasets` | 数据集体检（内置 .mat + `data/datasets` 下上传的表格数据集） |
 | GET | `/datasets/db` | Datasets 表登记记录；`POST` 登记新数据集 |
 | POST | `/datasets/upload` | 上传表格文件到 `data/datasets/<名称>/`（multipart：`name` + 多个 `file`） |
@@ -39,7 +43,11 @@ Web服务器 ─▶ flask_restful 接口(Web访问) ─┬─▶ 算法模型1(1
 | POST | `/system/maintenance` | 维护（目前支持 `target=figures` 清空图库，危险） |
 | GET | `/figures` | 已生成的图（训练曲线/混淆矩阵/每类指标/预测分布/预测波形） |
 | GET | `/figures/<路径>` | 直接返回 PNG（浏览器打开即可看） |
-| — | `/todos` 等 | 原有示例接口，**未改动** |
+
+> 上面这张表与 `register_api()` 一一对应（共 24 条）。**`/todos` 已不存在**：它随 flask_restful
+> 官方示例一起删除，接口索引里也不再列它。三条 `GET/PUT/DELETE /datasets/db/<id>` 单行增删改
+> 路由同样已删除（全项目零调用，前端只保留 `datasetDb` / `registerDataset`）——
+> 现在**唯一**的权威清单是运行中的 `GET /api`。
 
 ```bash
 # 训练（1dcnn / cwt_cnn / adtk，也可写 算法模型1/2/3）
@@ -54,8 +62,14 @@ curl -X POST http://127.0.0.1:5000/predict -H "Content-Type: application/json" \
 ```
 
 `POST /train` 常用参数：`epochs` `batch_size` `number` `length` `stride` `rate` `seed`
-`strict`（是否跳过越界窗口）`legacy_scaler`（是否复刻旧脚本的标准化口径）；
-adtk 另有 `detector` `k` `baseline_file` `max_points` `factor`。
+`strict`（是否跳过越界窗口）`legacy_scaler`（是否复刻旧脚本的标准化口径）
+`dataset_type`（`matlab` / `tabular`，不传就按目录里有什么自动判断）。
+
+adtk 另有：`detector`（默认 `PcaAD`）、`k`（默认 4）、`c`（默认 5.0）、
+`feature_mode`（`stats` 10 维统计特征 / `raw` 784 点原始幅值）、`sampling_rate`（默认 48000）、
+`threshold_quantile`（默认 0.995）、`factor`（默认 1.0）、`baseline_file`（默认 `normal_0_97.mat`，
+**只能是文件名**）、`max_points`（默认 40 万点，超出部分截断）。
+`training._train_adtk` 会读上面每一个键，可对照 `data/models/adtk/v2/meta.json` 的 `params`。
 
 ## 二、产物约定（流程图里的「Pxl模型」）
 
@@ -162,7 +176,11 @@ data/figures/<模型>/<版本>/training_curves.png        准确率/损失（训
 | `cwt_cnn/preprocess.py` | **未改动** |
 | `cwt_cnn/cwt_cnn_pytorch.py` | 重构：训练主体收进函数、入口移入 `__main__`，`python cwt_cnn_pytorch.py` 表现不变；`fc1` 输入维度由硬编码 `16*196` 改为按 `length` 推导 |
 | `main.py` | 只加了 `register_api(api)` 与 `threaded=True` |
-| `sql/schema*.sql` | 未改动，新增一份 `schema_sqlite.sql` |
+| `sql/schema_mysql.sql` | **唯一保留**的建表脚本（MySQL 专用） |
+
+> ⚠️ 这句以前写的是「`sql/schema*.sql` 未改动，新增一份 `schema_sqlite.sql`」——两份都不在了：
+> `sql/` 目录下现在**只有 `schema_mysql.sql`**（T-SQL 版 `schema.sql` 与 SQLite 版都随各自方言分支
+> 一起删除）。如果看到别处还提到 `schema.sql`，那是没跟着清的墓碑注释。
 
 服务侧**没有**复用 `1DCNN/preprocessing.py` 的切片逻辑，而是新增 `datasets.py`，差异都是刻意的：
 
@@ -178,10 +196,15 @@ data/figures/<模型>/<版本>/training_curves.png        准确率/损失（训
 
 ## 五、明确的已知限制
 
-1. **adtk 分支判别力不足**（按你的要求已搁置，代码保留但未训练产物）：以正常轴承信号为基线
-   fit `PcaAD(k=1)`，在原始振动窗口上，故障窗口的异常点占比（0.026~0.103）反而**低于**基线参考
-   占比（0.137），标定后所有窗口都判为"正常"。要做成有用的异常检测，得先做特征工程
-   （CWT 时频图/统计特征），这也正是流程图里「算法模型3」还缺的一块。
+1. ~~**adtk 分支判别力不足**~~ —— **已解决，别再照这段下结论**。这里原先写的是"以正常信号为基线
+   fit `PcaAD(k=1)`，在原始振动窗口上故障窗口的异常点占比（0.026~0.103）反而低于基线（0.137），
+   标定后全判正常"。根因不是 adtk 不行，而是**喂错了形状**：`PcaAD` 内部是
+   `PcaReconstructionError(k)` + `InterQuartileRangeAD(c)`，它把 **DataFrame 的每一行**当成高维空间
+   里的一个点，而老代码喂的是「采样点 × 1 列」，PCA 退化成 1 维、重构误差恒为 0，只剩 IQR 在噪声上乱响。
+   改成「行 = 窗口」（窗口 × 统计特征）之后，**实测 AUC = 1.0000，正常文件 0/20 判异常、
+   4 个故障文件 19~20/20 判异常**，阈值另用留出集（未参与拟合的那 30% 窗口）标定，
+   `baseline_false_positive_rate` 才有意义。当前产物 `data/models/adtk/v2` 就是新格式。
+   （另：老格式产物已**不再支持**，推理侧遇到会直接报错，不会静默按错误阈值判"正常/异常"。）
 2. **`/train` 是同步阻塞的**，没有任务队列；开发服务器开了 `threaded=True`，
    但一条训练请求会占住一个线程（实测 1DCNN 10 epoch 约 15 秒，cwt_cnn 50 epoch 约 40 秒）。
 3. **`model_service` 不写模型版本号**（只有自增的 `v1/v2`），`ModelDeployments` 表和
@@ -190,5 +213,6 @@ data/figures/<模型>/<版本>/training_curves.png        准确率/损失（训
    - 某些受限环境禁止在 `mkdtemp` 建的目录里写文件 → Keras 原生 `.keras`（zip，先写临时文件再改名）
      必然失败，代码会自动回退到 h5py 直写的 `.h5`；失败的 `.keras` 半成品会被显式删除，
      否则它（只有 config.json、没有权重）会被权重查找误命中。
-   - pip 在这类环境下也装不了包（同样的临时目录限制），本次 `pymysql` / `pyodbc`
-     是直接解包 wheel 到 site-packages 安装的。
+   - pip 在这类环境下也装不了包（同样的临时目录限制），本次 `pymysql` 是直接解包 wheel 到
+     site-packages 安装的。（`pyodbc` / `pywin32` 那次是为了当时还没删的 SQL Server 分支装的，
+     现已不需要，`requirements.txt` 里也没有它们。）

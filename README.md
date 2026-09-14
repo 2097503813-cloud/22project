@@ -102,7 +102,10 @@ MODEL_DB_PASSWORD=<你的密码>
 MODEL_DB_NAME=model_management
 ```
 
-> 没有 MySQL 也能跑：探测不到数据库时 `model_service` 会自动退化成 SQLite，接口照常工作。
+> ⚠️ **只连 MySQL，没有兜底库**：`MODEL_DB_DIALECT` 只接受 `mysql`，配成别的值（例如曾经示例里的
+> `sqlserver`）会在服务启动的 import 期直接报 `RuntimeError`。历史上确实有过"探测不到库就退回
+> SQLite"的兜底，那条路径连同 `SQLITE_PATH` 常量都已删除 —— 现在**必须**先备好一个可用的 MySQL
+> 库，`db.env` 里那六行是唯一的配置方式。
 
 ### 2. 后端（必须先起）
 

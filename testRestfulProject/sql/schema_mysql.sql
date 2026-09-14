@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS `EdgeDevices` (
     `IPAddress`     VARCHAR(45)   NULL,       -- IPv4/IPv6 文本
     `Location`      VARCHAR(255)  NULL,
     `HardwareSpecs` LONGTEXT      NULL,       -- 硬件规格（自由文本 / JSON）
-    `EdgeStatus`    VARCHAR(20)   NULL,       -- 设备侧运行状态（与 Status 语义重叠，见 schema.sql 末尾备注）
+    `EdgeStatus`    VARCHAR(20)   NULL,       -- 设备侧运行状态（与 Status 语义重叠，见 InferenceResults 的冗余列备注）
     `LastHeartbeat` DATETIME(6)   NULL,
     `DeviceCode`    VARCHAR(100)  NULL,
     `MacAddress`    VARCHAR(50)   NULL,
@@ -208,7 +208,8 @@ CREATE TABLE IF NOT EXISTS `InferenceTasks` (
 CREATE TABLE IF NOT EXISTS `InferenceResults` (
     /* 推理结果明细，一个任务 N 行（一个窗口一行）。
        分类任务用 PredictedClass/Label/Confidence，异常检测用 IsAnomaly/AnomalyScore，
-       两类共享同一张表，所以近义列较多（见 schema.sql 末尾的冗余列备注） */
+       两类共享同一张表，所以近义列较多：PredictedValue 与 Confidence 同值、Score 又与
+       Confidence 同值（三写一读，保留是为了兼容早期读取口径） */
     `ResultID`          BIGINT        NOT NULL AUTO_INCREMENT,
     `InferenceTaskID`   INT           NOT NULL,
     `RowIdentifier`     VARCHAR(100)  NULL,   -- 形如 内圈故障.csv#3，用来回溯这一行的来源
@@ -244,4 +245,7 @@ INSERT IGNORE INTO `Models` (`ModelName`, `Description`, `ApiEndpoint`, `ModelTy
 VALUES
  ('1DCNN',   '一维卷积神经网络，CWRU 轴承振动信号 10 类故障分类。', NULL, 'Classification',   '可运行'),
  ('cwt_cnn', '与 1DCNN 同任务的 PyTorch 实现，输出混淆矩阵。',       NULL, 'Classification',   '可运行'),
- ('adtk',    '时序异常检测库（无监督），项目经 main.py 调用 PcaAD。', '/todos', 'AnomalyDetection', '可运行');
+ ('adtk',    '时序异常检测库（无监督），项目经 main.py 调用 PcaAD。', '/predict', 'AnomalyDetection', '可运行');
+-- ⚠️ adtk 这行的 ApiEndpoint 原先是 '/todos'（flask_restful 官方示例路由，早已随示例一起删除）。
+--    这个值会显示在「模型管理」页的「接口」一栏，留着等于给用户指一个 404 的地址；
+--    三个模型实际都由 POST /predict 提供服务，所以改指 /predict。

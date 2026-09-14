@@ -16,17 +16,13 @@
 注意：原有脚本 `1DCNN/preprocessing.py`、`cwt_cnn/preprocess.py` **未被修改**，
 命令行跑它们的行为与之前完全一致；这里是服务侧新增的一条更严格的数据通路。
 """
-
 from __future__ import annotations
-
 import re
 from pathlib import Path
-
 import numpy as np
 from scipy.io import loadmat
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
-
 # ----------------------------------------------------------------------------
 # CWRU 0HP 的 10 类：顺序沿用本机 os.listdir 的字母序（= 既有实验结果里的编号），
 # 但从此写死在这里，不再依赖文件系统返回顺序。
@@ -48,7 +44,6 @@ CWRU_0HP_CLASSES: list[tuple[str, int, str]] = [
     ("48k_Drive_End_OR021@6_0_238.mat", 8, "外圈故障-0.021in@6点钟"),
     ("normal_0_97.mat",                9, "正常"),
 ]
-
 # 未登记 .mat 的兜底命名规则：文件名前缀 → 故障部位（捕获组里是故障尺寸，单位 0.001in）。
 # 只影响"显示成什么名字"，不影响类别号——未登记文件的类别号在 load_windows 里递增分配。
 _FAULT_PATTERNS = [    (re.compile(r"^48k_Drive_End_B0(\d+)_", re.I), "滚动体故障"),
@@ -56,8 +51,6 @@ _FAULT_PATTERNS = [    (re.compile(r"^48k_Drive_End_B0(\d+)_", re.I), "滚动体
     (re.compile(r"^48k_Drive_End_OR0(\d+)@", re.I), "外圈故障"),
     (re.compile(r"^normal_", re.I), "正常"),
 ]
-
-
 def guess_label(filename: str) -> str:
     """给不在登记表里的 .mat 文件兜底起个可读名字。"""
     # 只负责"起个能看懂的名字"：命中原脚本的命名风格 → "部位-尺寸in"；没命中 → 直接用文件名。
@@ -70,8 +63,6 @@ def guess_label(filename: str) -> str:
             size = int(m.group(1)) / 1000.0
             return f"{name}-{size:.3f}in"
     return Path(filename).stem
-
-
 def class_table(data_dir: Path | str) -> list[dict]:
     """返回该目录下「文件 → 类别号 → 标签」的对照表，并标出与磁盘不一致的地方。"""
     # 做的是"登记表 ↔ 磁盘实况"的对照：登记了但盘上没有 → on_disk=False（调用方据此提示缺文件）；
@@ -90,8 +81,6 @@ def class_table(data_dir: Path | str) -> list[dict]:
         table.append({"filename": extra, "class_id": None, "label": guess_label(extra),
                       "on_disk": True, "size_bytes": None, "unregistered": True})
     return table
-
-
 def read_de_channel(file_path: Path) -> np.ndarray:
     """读取 .mat 里的驱动端(DE)振动通道——与原 preprocessing.py 的取数口径一致。"""
     # CWRU 一个 .mat 里塞了多个变量（X###_DE_time / _FE_time / _BA_time / RPM…），全项目统一
@@ -106,8 +95,6 @@ def read_de_channel(file_path: Path) -> np.ndarray:
             # ravel()：.mat 里的变量可能是 (N,1) 二维，统一拉成 1D，下游切窗只认一维数组
             return np.asarray(mat[key]).ravel().astype(np.float64)
     raise KeyError(f"{file_path.name} 中找不到含 'DE' 的通道")
-
-
 def _slice_windows(signal: np.ndarray, number: int, length: int, stride: int,
                    samp_train: int, strict: bool) -> tuple[list[np.ndarray], list[np.ndarray], int, int]:
     """按原脚本的取样口径切训练/测试窗口，并做越界检查。
@@ -123,7 +110,6 @@ def _slice_windows(signal: np.ndarray, number: int, length: int, stride: int,
     train_windows: list[np.ndarray] = []
     test_windows: list[np.ndarray] = []
     skipped_train = skipped_test = 0
-
     # 训练窗：从 j*stride 起（j = 0..samp_train-1），每 stride 取一个 length 长的窗。
     for j in range(samp_train):
         start = j * stride
@@ -135,7 +121,6 @@ def _slice_windows(signal: np.ndarray, number: int, length: int, stride: int,
             train_windows.append(signal[start:start + length])
         else:
             skipped_train += 1
-
     # 测试窗起点 = samp_train*stride + length：先空出 length 的间隔再往后切，
     # 保证测试段与最后一个训练窗**不重叠**——否则同一段波形既训练又测试，指标会虚高。
     base = samp_train * stride + length
@@ -146,13 +131,10 @@ def _slice_windows(signal: np.ndarray, number: int, length: int, stride: int,
             test_windows.append(signal[start:start + length])
         else:
             skipped_test += 1
-
     # ⚠️ 入参 strict 现在两种取值行为**完全一致**（都跳过越界窗口），它只为兼容历史调用签名而保留。
     #    历史上 strict=False 会产出短数组，而下游没有补 NaN 这一步，等于"一用就崩"，
     #    所以不要指望 strict=False 能多榨出几个样本。
     return train_windows, test_windows, skipped_train, skipped_test
-
-
 def load_windows(dataset_dir: Path | str, length: int, number: int, stride: int,
                  rate: list[float], normal: bool = True, seed: int = 42,
                  strict: bool = True, legacy_scaler: bool = False) -> dict:
@@ -168,12 +150,10 @@ def load_windows(dataset_dir: Path | str, length: int, number: int, stride: int,
     dataset_dir = Path(dataset_dir)
     if not dataset_dir.is_dir():
         raise FileNotFoundError(f"数据集目录不存在：{dataset_dir}")
-
     # 只有"磁盘上真的存在"的行才参与训练：登记表里缺失的文件只出现在体检结果里（on_disk=False）
     table = [row for row in class_table(dataset_dir) if row["on_disk"]]
     if not table:
         raise FileNotFoundError(f"{dataset_dir} 下没有任何 .mat 文件")
-
     # 训练窗口数由 number 与"验证+测试"占比反推：number*(1-rate[1]-rate[2])。
     # ⚠️ rate[0]（名义上的 train 比例）**在这里不参与任何运算**，详见 finalize_windows 里的说明。
     samp_train = int(number * (1 - (rate[1] + rate[2])))
@@ -182,12 +162,10 @@ def load_windows(dataset_dir: Path | str, length: int, number: int, stride: int,
     test_x: list[np.ndarray] = []
     test_y: list[int] = []
     per_class: list[dict] = []
-
     # 未登记的 .mat（不在 CWRU_0HP_CLASSES 里）以前会**全部**拿到 `len(table)` 这一个 id：
     # 多个文件被并成同一类，而且 labels 长度与 num_classes 对不上。现在各自一个递增 id。
     registered_ids = [row["class_id"] for row in table if row["class_id"] is not None]
     next_extra_id = (max(registered_ids) + 1) if registered_ids else 0
-
     # 逐文件读 DE 通道 → 切窗 → 累积样本。每个文件独立切窗，各类样本数天然不均，
     # 所以 per_class 会逐个文件记真实窗口数与跳过数，方便排查"某一类被切空"。
     for row in table:
@@ -209,7 +187,6 @@ def load_windows(dataset_dir: Path | str, length: int, number: int, stride: int,
             "skipped_out_of_range": {"train": skip_tr, "test": skip_te},
             "nan_windows": int(sum(1 for w in tr + te if w.size != length)),
         })
-
     # 未登记文件在循环里拿到了递增 id（表里仍是 None），排序时按"生效顺序"排：
     # 直接用 r["class_id"] 会拿 None 和 int 比较 → TypeError（原来只要有未登记 .mat 就必崩）
     labels = [row["label"] for row in sorted(table, key=lambda r: (r["class_id"] is None, r["class_id"] or 0))]
@@ -231,8 +208,6 @@ def load_windows(dataset_dir: Path | str, length: int, number: int, stride: int,
     }
     return finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, seed,
                             legacy_scaler, stats)
-
-
 def finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, seed,
                      legacy_scaler, stats: dict) -> dict:
     """两个数据源（.mat 与表格）共用的收尾：标准化 → 划分 → 打乱。
@@ -243,7 +218,6 @@ def finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, see
     #    一旦混进短数组，numpy ≥1.24 会直接抛 inhomogeneous shape（这一层没有补 NaN 的兜底）。
     train_x = np.asarray(train_x, dtype=np.float64)
     test_x = np.asarray(test_x, dtype=np.float64)
-
     # 标准化：默认只用训练集 fit，推理侧必须复用同一套 mean/scale，故 scaler_stats 随模型落盘。
     if normal:
         # ⚠️ legacy_scaler=True 复刻的是旧脚本的**有瑕疵**做法：把 train+test 拼起来 fit，
@@ -258,7 +232,6 @@ def finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, see
         scaler_stats = {"mean": scaler.mean_, "scale": scaler.scale_, "legacy": legacy_scaler}
     else:
         scaler_stats = None
-
     # ⚠️ rate = [train, valid, test] 里**只有 rate[1]、rate[2] 真正参与运算**：训练集规模在上游由
     #    number*(1-rate[1]-rate[2]) 定死，rate[0] 只被写进 meta/stats 供展示；这里的 test_size 是
     #    "测试集在 验证+测试 池里的占比" = rate[2]/(rate[1]+rate[2])，
@@ -275,7 +248,6 @@ def finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, see
     for valid_idx, test_idx in splitter.split(test_x, test_y_arr):
         x_valid, x_test = test_x[valid_idx], test_x[test_idx]
         y_valid, y_test = test_y_arr[valid_idx], test_y_arr[test_idx]
-
     # 训练集额外洗一次牌并固定随机种子（原脚本没固定，同参数两次跑出过 0.5933 与 0.750 两种测试准确率）；
     # 洗牌是为了打断"同一文件、同一时间段的窗口连续喂入"造成的顺序偏差。
     # ⚠️ 注意只有训练集在这里被打乱：valid/test 是上面分层划分出来的，类内顺序已被 seed 打乱过，
@@ -283,7 +255,6 @@ def finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, see
     train_y_arr = np.asarray(train_y, dtype=np.int32)
     order = np.random.RandomState(seed).permutation(len(train_x))
     x_train, y_train = train_x[order], train_y_arr[order]
-
     stats = {**stats,
              "train_total": int(len(x_train)), "valid_total": int(len(x_valid)),
              "test_total": int(len(x_test))}
@@ -294,8 +265,6 @@ def finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, see
         "labels": labels, "stats": stats,
         "scaler": scaler_stats,
     }
-
-
 def describe_dataset(dataset_dir: Path | str) -> dict:
     """只做体检，不切数据：给 /models 与 /train 的预检用。
 
@@ -312,7 +281,6 @@ def describe_dataset(dataset_dir: Path | str) -> dict:
     #    那正是 /models、/train 预检页面卡顿的头号原因——体检只需要采样点数，不需要数据本身。
     from scipy.io import whosmat
     dataset_dir = Path(dataset_dir)
-
     rows = class_table(dataset_dir)
     present = [r for r in rows if r["on_disk"]]
     samples: dict[str, int] = {}

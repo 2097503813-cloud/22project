@@ -9,7 +9,5 @@
     inference.py  推理（流程图里的「推理」盒子）
     api.py        flask_restful 接口资源（流程图里的「Web访问」盒子）
 """
-
 from .config import config  # noqa: F401
-
 __all__ = ["config"]

@@ -19,23 +19,17 @@ meta.json 一定要带类别表：否则模型文件本身无法解释 0..9 到�
 重新训练 = 直接替换该模型的产物目录。旧的多版本目录由
 `_archive_legacy_versions()` 一次性搬去 data/archive/model_versions/（不删）。
 """
-
 from __future__ import annotations
-
 import json
 import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-
 from .config import config
-
 _WEIGHT_NAMES = ("model.keras", "model.pt", "detector.pkl", "model.h5")
 # 模型名允许的字符：中英文、数字、下划线、点、横线（见 _model_dir 的安全说明）
 _MODEL_NAME_RE = re.compile(r"^[\w\u4e00-\u9fa5.\-]+$")
-
-
 @dataclass
 class Artifact:
     """一个已落盘的模型产物：**定位信息**（目录 / 权重文件）+ **自解释信息**（框架 / meta）。
@@ -43,13 +37,11 @@ class Artifact:
     它不是"模型对象"，只是磁盘上那堆文件的**句柄**——推理时按 `weights` 加载、
     按 `framework` 决定用哪个引擎、按 `meta["input_len"]` 决定切多长的窗。
     """
-
     name: str                 # 模型名（同时也是 data/models 下的目录名，如 1dcnn）
     directory: Path           # 产物目录的绝对路径 data/models/<名>/
     weights: Path             # 权重文件绝对路径（model.h5 / model.pt / detector.pkl）
     framework: str            # tensorflow-keras / pytorch / adtk —— 推理分派靠它
     meta: dict = field(default_factory=dict)   # meta.json 的完整内容（见模块头）
-
     def to_dict(self) -> dict:
         """挑出给接口/前端用的字段（meta 里的原始 dict 太大，不透传）。
 
@@ -69,8 +61,6 @@ class Artifact:
             "dataset": self.meta.get("dataset"),
             "created_at": self.meta.get("created_at"),
         }
-
-
 def _model_dir(name: str) -> Path:
     """模型名 → 产物目录。**必须净化**。
 
@@ -86,8 +76,6 @@ def _model_dir(name: str) -> Path:
         # 以点开头会和暂存目录 `.staging-*` 撞名，也会藏成隐藏目录
         raise ValueError(f"非法的模型名 {name!r}：不能以点开头")
     return config.model_dir / clean
-
-
 def _read_meta(directory: Path) -> dict:
     """读 meta.json；缺失或内容坏掉都返回空 dict，让调用方走默认分支而不是崩掉。"""
     meta_path = directory / "meta.json"
@@ -97,8 +85,6 @@ def _read_meta(directory: Path) -> dict:
         return json.loads(meta_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
-
-
 def _find_weights(directory: Path) -> Path | None:
     """找权重文件。
 
@@ -116,8 +102,6 @@ def _find_weights(directory: Path) -> Path | None:
         if p.is_file() and p.stat().st_size > 0:
             return p
     return None
-
-
 def begin_artifact(name: str) -> tuple[Path, Path]:
     """开始写一个产物：返回 (产物目录, 暂存目录)。
 
@@ -131,8 +115,6 @@ def begin_artifact(name: str) -> tuple[Path, Path]:
     stage = root / f".staging-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
     stage.mkdir()
     return root, stage
-
-
 def commit_artifact(root: Path, stage: Path) -> None:
     """把暂存目录里的文件搬进产物目录，并清掉旧产物。
 
@@ -146,13 +128,9 @@ def commit_artifact(root: Path, stage: Path) -> None:
     for item in stage.iterdir():
         item.rename(root / item.name)
     stage.rmdir()
-
-
 def abort_artifact(stage: Path) -> None:
     """放弃这次写入：只删暂存目录，**旧产物不受影响**。"""
     shutil.rmtree(stage, ignore_errors=True)
-
-
 def save_artifact(name: str, framework: str, saver, meta: dict) -> Artifact:
     """落盘一个模型产物，返回可用的 Artifact。**重新训练会直接替换该模型的旧产物。**
 
@@ -186,8 +164,6 @@ def save_artifact(name: str, framework: str, saver, meta: dict) -> Artifact:
         abort_artifact(stage)
         raise
     return Artifact(name=name, directory=root, weights=root / weights.name, framework=framework, meta=meta)
-
-
 def load_artifact(name: str) -> Artifact:
     """按名字取产物（本项目一个模型只有一个产物，没有版本可选）。
 
@@ -205,8 +181,6 @@ def load_artifact(name: str) -> Artifact:
     meta = _read_meta(directory)
     return Artifact(name=name, directory=directory, weights=weights,
                     framework=meta.get("framework", "unknown"), meta=meta)
-
-
 def list_artifacts(name: str | None = None) -> list[Artifact]:
     """列出已落盘的产物；name 为空时列出全部模型（每个模型最多一条）。"""
     if not config.model_dir.is_dir():
@@ -230,8 +204,6 @@ def list_artifacts(name: str | None = None) -> list[Artifact]:
         out.append(Artifact(name=model_name, directory=directory, weights=weights,
                             framework=meta.get("framework", "unknown"), meta=meta))
     return out
-
-
 def delete_artifact(name: str) -> dict:
     """删除某个模型的产物目录（危险操作，由 DELETE /models/<名>?scope=artifact 触发）。
 
@@ -247,8 +219,6 @@ def delete_artifact(name: str) -> dict:
     size = sum(p.stat().st_size for p in files)
     shutil.rmtree(directory)
     return {"deleted": name, "files": len(files), "freed_kb": round(size / 1024, 1)}
-
-
 def archive_legacy_versions() -> dict:
     """把旧布局（data/models/<名>/vN/）搬成新布局（data/models/<名>/），旧版本归档。
 

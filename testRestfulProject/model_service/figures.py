@@ -28,30 +28,22 @@
 调用方（training.py / inference.py）只是把它记进结果的 `figures_error` 字段，
 绝不因为"图没画出来"就让训练或推理本身判为失败 —— 图只是结论的补充说明，不是结论本身。
 """
-
 from __future__ import annotations
-
 import os
 import traceback
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-
 from .config import config
-
 # ⚠️ 缓存目录必须在**第一次 import matplotlib 之前**通过环境变量指定（之后改无效）：
 # matplotlib 默认把字体缓存写到用户目录，受限环境（沙箱 / 只读 HOME）下不可写会报警甚至失败；
 # 统一挪到项目内 data/.cache/matplotlib，缓存也就跟着项目一起清理。
 # 后端（Agg）则在 `_pyplot()` 里设置 —— 同样要求早于 pyplot 的导入。
 os.environ.setdefault("MPLCONFIGDIR", str(config.data_dir / ".cache" / "matplotlib"))
-
 FIG_DIR = config.data_dir / "figures"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
-
 _CJK_FONTS = ["Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC", "Source Han Sans SC"]
 _plt = None
-
-
 def _pyplot():
     """懒加载 matplotlib 并配好全局样式（只做一次）。返回 pyplot 模块。"""
     global _plt
@@ -62,7 +54,6 @@ def _pyplot():
         matplotlib.use("Agg")                      # 无头：服务器上没有显示器，只写文件
         import matplotlib.pyplot as plt
         from matplotlib import font_manager
-
         # ⚠️ 中文字体必须**显式指定**（SimHei / Microsoft YaHei 等）：matplotlib 自带的
         # DejaVu Sans 没有汉字字形，缺字形时它**不报错**，只是把每个汉字画成一个方框
         # （"豆腐块"），很容易被误当成前端/编码问题去查。
@@ -77,8 +68,6 @@ def _pyplot():
         plt.rcParams["grid.alpha"] = 0.3
         _plt = plt
     return _plt
-
-
 def _short_labels(labels: list[str]) -> list[str]:
     """把长标签压成适合当坐标轴的两行短名：滚动体故障-0.007in -> 滚动体\\n0.007in"""
     out = []
@@ -93,8 +82,6 @@ def _short_labels(labels: list[str]) -> list[str]:
         detail = detail.replace("@6点钟", "@6").replace("in", "")
         out.append(f"{kind}\n{detail}" if detail else kind)
     return out
-
-
 def _save(fig, path: Path) -> dict:
     """落盘一张图并关掉它（不 close 会累积内存），返回带可直接访问 url 的条目。
 
@@ -109,8 +96,6 @@ def _save(fig, path: Path) -> dict:
     rel = path.relative_to(FIG_DIR).as_posix()      # 统一成正斜杠，前端当 URL 用
     return {"name": path.name, "path": str(path), "url": f"/figures/{rel}",
             "size_kb": round(path.stat().st_size / 1024, 1)}
-
-
 # ------------------------------------------------------------------ 训练期出图
 def training_figures(model: str, meta: dict, extra: dict | None = None) -> dict:
     """生成训练期三张图，返回 {"figures": [...], "dir": ..., "error": ...}
@@ -127,7 +112,6 @@ def training_figures(model: str, meta: dict, extra: dict | None = None) -> dict:
         metrics = meta.get("metrics") or {}
         history = metrics.get("history") or {}
         labels = meta.get("labels") or []
-
         # ① 训练曲线
         epochs = range(1, max((len(v) for v in history.values()), default=0) + 1)
         if epochs:
@@ -146,7 +130,6 @@ def training_figures(model: str, meta: dict, extra: dict | None = None) -> dict:
             fig.suptitle(f"{meta.get('model', model)} · 训练曲线 "
                          f"(epochs={len(list(epochs))})", fontsize=13)
             figures.append(_save(fig, target / "training_curves.png"))
-
         # ② 混淆矩阵
         confusion = extra.get("confusion")
         if confusion and labels:
@@ -171,7 +154,6 @@ def training_figures(model: str, meta: dict, extra: dict | None = None) -> dict:
                                 color="white" if mat[i, j] > threshold else "#333333")
             ax.grid(False)
             figures.append(_save(fig, target / "confusion_matrix.png"))
-
         # ③ 每类 P/R/F1
         per_class = extra.get("per_class") or {}
         if per_class and labels:
@@ -192,13 +174,10 @@ def training_figures(model: str, meta: dict, extra: dict | None = None) -> dict:
                 ax.set_title(f"{meta.get('model', model)} · 各类别精确率/召回率/F1")
                 ax.legend()
                 figures.append(_save(fig, target / "per_class_metrics.png"))
-
         return {"figures": figures, "dir": str(target), "error": None}
     except Exception as exc:                                     # pragma: no cover
         return {"figures": figures, "dir": str(target),
                 "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()[-800:]}
-
-
 # ------------------------------------------------------------------ 推理期出图
 def inference_figures(model: str, payload: dict, matrix=None) -> dict:
     """生成推理期两张图：预测分布 + 预测窗口波形（最多 6 个窗口）。
@@ -213,7 +192,6 @@ def inference_figures(model: str, payload: dict, matrix=None) -> dict:
         plt = _pyplot()
         predictions = payload.get("predictions") or []
         task = payload.get("task")          # ② 里靠它区分"分类窗口标题"和"异常窗口标题"
-
         # ① 预测分布
         # ⚠️ 这里**不能**按 task 分支：分类与异常检测的预测标签都在 p["predicted_label"] 里，
         #    两支代码一字不差。历史上这里写成 if task == "classification" 并在分支内
@@ -233,7 +211,6 @@ def inference_figures(model: str, payload: dict, matrix=None) -> dict:
             ax.set_ylabel("窗口数")
             ax.set_title(f"{model} · 本次推理 {payload.get('count')} 个窗口的预测分布")
             figures.append(_save(fig, target / "prediction_distribution.png"))
-
         # ② 预测窗口波形
         if matrix is not None:
             import numpy as np
@@ -275,13 +252,10 @@ def inference_figures(model: str, payload: dict, matrix=None) -> dict:
                          f"\n{str(payload.get('input', {}).get('path') or '内联数组')}", fontsize=11)
             fig.tight_layout()
             figures.append(_save(fig, target / "predicted_windows.png"))
-
         return {"figures": figures, "dir": str(target), "error": None}
     except Exception as exc:                                     # pragma: no cover
         return {"figures": figures, "dir": str(target),
                 "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()[-800:]}
-
-
 def list_figures(limit: int = 200) -> list[dict]:
     """列出已生成的图，供 GET /figures 用。"""
     out = []
@@ -293,8 +267,6 @@ def list_figures(limit: int = 200) -> list[dict]:
         if len(out) >= limit:
             break
     return out
-
-
 def clear_figures() -> dict:
     """清空图库（危险操作，由系统的「维护」触发）。目录本身保留。"""
     removed = 0

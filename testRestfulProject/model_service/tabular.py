@@ -12,16 +12,11 @@
   * CSV 编码依次尝试 utf-8-sig → utf-8 → gbk（中文 Excel 导出的 CSV 常见 GBK）
   * 越界窗口与 .mat 一样：strict=True 跳过并回报，绝不补 NaN
 """
-
 from __future__ import annotations
-
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
-
 from . import datasets as ds
-
 # 支持的表格后缀（决定"这个目录算不算表格数据集"）；EXCEL_SUFFIXES 是其中要交给 Excel 引擎的那部分。
 TABLE_SUFFIXES = {".csv", ".txt", ".xlsx", ".xlsm", ".xls"}
 EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
@@ -32,15 +27,11 @@ SIGNAL_HINTS = ("振幅", "振动", "幅值", "加速度", "signal", "value", "a
                 "de_time", "de", "acc")
 # 时间/序号列优先排除：它们天然单调递增、std 也很大，是最容易被误选成"振动信号"的干扰项。
 TIME_HINTS = ("时间", "时刻", "序号", "采样点序号", "time", "timestamp", "date", "index", "no.")
-
-
 def is_table(path: Path | str) -> bool:
     """是不是一张可读的表格（只看扩展名，不打开文件）。"""
     # 只看后缀不打开文件：便宜到可以在遍历目录时随便调；代价是坏文件/空文件也会被认成表格，
     # 真正的读取错误留到 read_table / describe_directory 里报出来。
     return Path(path).suffix.lower() in TABLE_SUFFIXES
-
-
 def has_tables(directory: Path | str) -> bool:
     """目录里是否存在表格文件——训练侧据此自动判定数据源类型（matlab / tabular）。"""
     # ⚠️ 只回答"目录里有没有表格后缀的文件"，不回答"目录存不存在"——目录存在性是上层
@@ -48,8 +39,6 @@ def has_tables(directory: Path | str) -> bool:
     # ⚠️ 上层判定数据源时是**先问表格、再找 .mat**：目录里同时放 .mat 和 csv 会走表格路径（见 resolve_source）。
     directory = Path(directory)
     return directory.is_dir() and any(is_table(p) for p in directory.iterdir() if p.is_file())
-
-
 def list_table_files(directory: Path | str) -> list[Path]:
     """按文件名排序返回表格文件（排序即类别号顺序，稳定可复现）。"""
     # ⚠️ 这个 list 顺序被 load_windows 直接当 class_id 用（enumerate），所以排序方式是"类别号口径"的一部分，
@@ -61,16 +50,12 @@ def list_table_files(directory: Path | str) -> list[Path]:
         return []
     return sorted([p for p in directory.iterdir() if p.is_file() and is_table(p)],
                   key=lambda p: p.name.lower())
-
-
 def label_from_filename(filename: str) -> str:
     """类别名 = 文件名去扩展名（不做其它改写，保证可追溯）。"""
     # 刻意不做任何清洗（不去空格、不替换下划线）：标签要能一眼对回磁盘上的文件。
     # ⚠️ 代价是 a.csv 与 a.xlsx 会得到同名标签 → 两个文件被当成两个"同名类别"，
     #    describe_directory 的 duplicate_labels 就是用来把这情况暴露出来的。
     return Path(filename).stem
-
-
 # ------------------------------------------------------------------ 读表
 def read_table(path: Path | str, sheet: str | int | None = None) -> pd.DataFrame:
     """读成 DataFrame。Excel 按后缀挑引擎，CSV 依次试编码并在必要时重猜分隔符。"""
@@ -104,8 +89,6 @@ def read_table(path: Path | str, sheet: str | int | None = None) -> pd.DataFrame
             last_error = exc
             break
     raise ValueError(f"读取失败：{path.name}（{last_error}）")
-
-
 def list_sheets(path: Path | str) -> list[str]:
     """Excel 的 sheet 名列表（非 Excel 或读失败一律返回空列表，调用方无需处理异常）。"""
     # 刻意吞掉所有异常：这个方法只服务于"给个 sheet 下拉框"，文件坏了不该让整个预览接口 500，
@@ -118,8 +101,6 @@ def list_sheets(path: Path | str) -> list[str]:
         return list(pd.ExcelFile(path, engine=engine).sheet_names)
     except Exception:
         return []
-
-
 def numeric_columns(frame: pd.DataFrame) -> list[str]:
     """真正的数值列：dtype 是数字，或整列都能转成数字且非全空。"""
     # 分两条路判断：pandas 已经认成数字 dtype 的直接收；object 列则尝试转换，
@@ -137,8 +118,6 @@ def numeric_columns(frame: pd.DataFrame) -> list[str]:
         if converted.notna().sum() >= max(1, int(0.8 * series.notna().sum())):
             out.append(str(col))
     return out
-
-
 def pick_signal_column(frame: pd.DataFrame, column: str | None = None) -> str:
     """选信号列：显式指定 > 列名像信号 > 首个数值列。"""
     numeric = numeric_columns(frame)
@@ -152,14 +131,12 @@ def pick_signal_column(frame: pd.DataFrame, column: str | None = None) -> str:
         if column not in numeric:
             raise ValueError(f"列 {column!r} 不是数值列；可选数值列：{numeric}")
         return column
-
     def named_like_signal(name: str) -> bool:
         """列名看着像信号吗：命中 SIGNAL_HINTS 且没命中 TIME_HINTS（时间列优先排除）。"""
         low = name.lower()
         if any(hint in low for hint in TIME_HINTS):
             return False
         return any(hint in low for hint in SIGNAL_HINTS)
-
     for col in numeric:
         # 第一优先级：列名像信号。以 DEMO 轴承表格数据（列：时间/振动幅值/温度）为例，
         # "振动幅值"命中 SIGNAL_HINTS 且不命中 TIME_HINTS → 被选中；
@@ -176,8 +153,6 @@ def pick_signal_column(frame: pd.DataFrame, column: str | None = None) -> str:
             return col
     # 最后兜底：一个都没挑出来就取第一个数值列，至少保证流程能往下走（而不是抛异常卡死在预检）
     return numeric[0]
-
-
 def read_signal(path: Path | str, column: str | None = None,
                 sheet: str | int | None = None) -> np.ndarray:
     """取一列数值作为振动信号（NaN 丢弃）。"""
@@ -192,8 +167,6 @@ def read_signal(path: Path | str, column: str | None = None,
     if values.size == 0:
         raise ValueError(f"列 {col!r} 全为空，取不到信号")
     return values
-
-
 # ------------------------------------------------------------------ 预览/体检
 def _jsonable(value):
     """把 numpy / pandas 的标量转成能进 JSON 的 Python 原生值（NaN → None）。"""
@@ -211,8 +184,6 @@ def _jsonable(value):
     if isinstance(value, float) and pd.isna(value):
         return None
     return value
-
-
 def preview(path: Path | str, rows: int = 20, sheet: str | int | None = None,
             column: str | None = None) -> dict:
     """表格预览：行列数、每列统计、前 N 行、推荐信号列。"""
@@ -230,7 +201,6 @@ def preview(path: Path | str, rows: int = 20, sheet: str | int | None = None,
         signal_column = pick_signal_column(frame, column)
     except Exception as exc:
         signal_error = str(exc)
-
     # 逐列算一份统计供表格预览页展示：空值/非空/唯一值，以及数值列的 min/max/mean/std。
     # is_num 复用 numeric_columns（与选信号列同一口径），conv 只用来算统计量。
     columns = []
@@ -248,7 +218,6 @@ def preview(path: Path | str, rows: int = 20, sheet: str | int | None = None,
             "std": round(float(conv.std()), 6) if is_num and conv.notna().any() else None,
             "is_signal": str(col) == signal_column,
         })
-
     # 前 N 行原样交给前端：itertuples(name=None) 拿纯值元组（不会被 pandas 塞进索引列），
     # 每个格子再经 _jsonable 转成原生类型，否则 np.int64/Timestamp 会让 jsonify 抛错。
     head = [[_jsonable(v) for v in row] for row in frame.head(rows).itertuples(index=False, name=None)]
@@ -265,8 +234,6 @@ def preview(path: Path | str, rows: int = 20, sheet: str | int | None = None,
         "head": head, "head_rows": len(head),
         "size_kb": round(path.stat().st_size / 1024, 1),
     }
-
-
 def _ttl_cache(max_age: float = 120.0):
     """给「读文件做体检」这类函数加个简单的 TTL 缓存。
 
@@ -277,7 +244,6 @@ def _ttl_cache(max_age: float = 120.0):
     # 缓存就挂在装饰器闭包里（一个被装饰函数一个 store），进程级、无淘汰、非线程安全。
     # ⚠️ 多线程同时未命中会各体检一遍，结果一致只是白做一次；条目数等于参数组合数，量级很小。
     store: dict = {}
-
     def deco(fn):
         def wrapper(*args, **kwargs):
             """按 (位置参数, 排序后的关键字参数) 做键查缓存，过期或没有就真跑一遍。"""
@@ -298,8 +264,6 @@ def _ttl_cache(max_age: float = 120.0):
         wrapper.cache_clear = store.clear
         return wrapper
     return deco
-
-
 @_ttl_cache(120)
 def describe_directory(directory: Path | str, sheet: str | int | None = None,
                        column: str | None = None) -> dict:
@@ -332,7 +296,6 @@ def describe_directory(directory: Path | str, sheet: str | int | None = None,
             item.update({"on_disk": True, "error": f"{type(exc).__name__}: {exc}"})
             errors.append(f"{path.name}: {exc}")
         items.append(item)
-
     # 重名检测只看读成功的文件（读失败的文件连标签都不可信）；
     # labels.count 是 O(n²)，但文件数是"一个类别一个文件"的量级，完全够用。
     labels = [i["label"] for i in items if not i.get("error")]
@@ -349,8 +312,6 @@ def describe_directory(directory: Path | str, sheet: str | int | None = None,
         "files": items, "errors": errors,
         "supported": sorted(TABLE_SUFFIXES),
     }
-
-
 # ------------------------------------------------------------------ 切窗训练
 def load_windows(directory: Path | str, length: int, number: int, stride: int, rate: list[float],
                  normal: bool = True, seed: int = 42, strict: bool = True, legacy_scaler: bool = False,
@@ -362,7 +323,6 @@ def load_windows(directory: Path | str, length: int, number: int, stride: int, r
     files = list_table_files(directory)
     if not files:
         raise FileNotFoundError(f"{directory} 下没有表格文件（支持 {sorted(TABLE_SUFFIXES)}）")
-
     # 与 .mat 数据源一样：训练窗口数由 number 与"验证+测试"占比反推，rate[0] 不参与运算
     samp_train = int(number * (1 - (rate[1] + rate[2])))
     train_x: list[np.ndarray] = []
@@ -371,7 +331,6 @@ def load_windows(directory: Path | str, length: int, number: int, stride: int, r
     test_y: list[int] = []
     per_class: list[dict] = []
     labels: list[str] = []
-
     for class_id, path in enumerate(files):
         signal = read_signal(path, column=column, sheet=sheet)
         # 复用 .mat 数据源同一套切窗（含越界检查），保证两个数据源口径一致
@@ -390,7 +349,6 @@ def load_windows(directory: Path | str, length: int, number: int, stride: int, r
             "skipped_out_of_range": {"train": skip_tr, "test": skip_te},
             "nan_windows": int(sum(1 for w in tr + te if w.size != length)),
         })
-
     # stats 字段名刻意与 .mat 数据源一一对齐（num_classes / nan_windows_total /
     # skipped_out_of_range_total / per_class …），上层训练接口、库表备注、前端展示因此都不用
     # 区分数据源类型；多出来的 signal_column / sheet 是表格特有的溯源信息。

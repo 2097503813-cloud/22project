@@ -19,17 +19,13 @@
 （占位符 `%s`/`?`、TOP/LIMIT、建表语句），踩了不少坑，现已统一到 MySQL：
 模型产物与图仍然落在文件系统上，数据库只负责索引/元数据，表结构见 sql/schema_mysql.sql。
 """
-
 from __future__ import annotations
-
 import os
 import tempfile
 from pathlib import Path
-
 SERVICE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SERVICE_DIR.parent            # testRestfulProject
 WORKSPACE_DIR = PROJECT_DIR.parent          # 22project
-
 DATA_DIR = PROJECT_DIR / "data"
 MODEL_DIR = DATA_DIR / "models"             # 模型产物（对应图里的「Pxl模型」）
 LOG_DIR = DATA_DIR / "logs"                 # 训练日志
@@ -37,23 +33,18 @@ UPLOAD_DIR = DATA_DIR / "datasets"          # 上传/存放的表格数据集（
 SQL_DIR = PROJECT_DIR / "sql"
 # ⚠️ 原来的 SQLITE_PATH（sqlite 兜底库路径）已删除：它零引用，且 sqlite 兜底本身
 #    也早在 __init__ 里被"只支持 MySQL"的校验挡掉了。
-
 # 内置的 CWRU .mat 数据集：键是前端/接口里用的数据集名，值是磁盘目录
 DATASET_DIRS = {
     "CWRU-0HP": PROJECT_DIR / "1DCNN" / "0HP",
     "CWRU-0HP(cwt)": PROJECT_DIR / "cwt_cnn" / "0HP",
 }
-
 # ⚠️ 原来的 ADTK_DATASET_DIR（adtk/dataset，adtk 自带样例数据的目录）已删除：全项目零读取方。
 #    adtk 分支的基线文件现在完全由训练请求的 dataset_dir 决定，找不到就明确报错
 #    （见 training._train_adtk）——那个"静默退回 adtk/dataset/cpu.csv"的兜底早就删掉了，
 #    这个常量是它留下的最后一截尾巴。
-
 # 这三个目录是运行期必需品，import 时就建好，免得别处还要各自判存在性
 for _d in (DATA_DIR, MODEL_DIR, LOG_DIR, UPLOAD_DIR):
     _d.mkdir(parents=True, exist_ok=True)
-
-
 def load_env_file() -> str | None:
     """可选的本地配置：testRestfulProject/db.env。
 
@@ -78,11 +69,7 @@ def load_env_file() -> str | None:
             os.environ[key] = value
             loaded.append(key)
     return str(path) if loaded else None
-
-
 ENV_FILE = load_env_file()
-
-
 def ensure_writable_tempdir() -> str:
     """确认临时目录可写，不可写就整体退到项目内的 data/tmp。
 
@@ -99,7 +86,6 @@ def ensure_writable_tempdir() -> str:
             return True
         except Exception:
             return False
-
     current = tempfile.gettempdir()
     if _writable(current):
         return current
@@ -108,11 +94,7 @@ def ensure_writable_tempdir() -> str:
     os.environ["TMPDIR"] = str(fallback)
     tempfile.tempdir = str(fallback)
     return str(fallback)
-
-
 TEMP_DIR = ensure_writable_tempdir()
-
-
 def _env(name: str, default: str | None = None) -> str | None:
     """读环境变量；空字符串按"没设"处理（否则 MODEL_DB_PASSWORD= 会被当成真的是空密码）。
 
@@ -121,11 +103,8 @@ def _env(name: str, default: str | None = None) -> str | None:
     """
     v = os.getenv(name)
     return v if v not in (None, "") else default
-
-
 class Config:
     """一次进程生命周期内不变的服务配置。"""
-
     def __init__(self) -> None:
         """把模块级的路径常量与环境变量快照成一份不可变配置。"""
         # ⚠️ 这里原来的 self.service_dir 与文件末尾的 self.adtk_dataset_dir 已删除：
@@ -139,7 +118,6 @@ class Config:
         self.upload_dir = UPLOAD_DIR
         self.sql_dir = SQL_DIR
         self.dataset_dirs = dict(DATASET_DIRS)
-
         # 本项目**只支持 MySQL**：早期为了"没装库也能跑"写过 SQLite 兜底与 SQL Server 分支，
         # 结果是三套方言各自演化、埋了不少坑（占位符、TOP/LIMIT、建表语句）。现在统一到 MySQL，
         # 别的取值直接报错，免得有人配错了却"看起来能跑"。
@@ -157,11 +135,9 @@ class Config:
         self.db_password = _env("MODEL_DB_PASSWORD", "")
         self.db_name = _env("MODEL_DB_NAME", "model_management")
         self.db_port = int(_env("MODEL_DB_PORT", "3306") or "3306")
-
         # ⚠️ 这里原来还有一个 self.defaults 字典（三套模型的默认超参速查表），已删除：
         #    它全项目零引用（只有本行赋值），运行时真正生效的默认值写在 training.py 里，
         #    形式是 `opts.get("epochs", 10)` 这类内联字面量。**改默认超参请改 training.py。**
-
     # ---- 便于 /health 与日志展示 ----
     def describe(self) -> dict:
         """给 /health 与前端「运行信息」用的配置摘要（只读快照，不含密码）。
@@ -187,6 +163,4 @@ class Config:
             "datasets": {k: str(v) for k, v in self.dataset_dirs.items()},
             "upload_dir": str(self.upload_dir),
         }
-
-
 config = Config()

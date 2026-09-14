@@ -20,9 +20,7 @@
 
 约定：任何失败都返回 {"error": ...} + 合适的状态码，并把细节写进 ModelInvocations（能写库时）。
 """
-
 from __future__ import annotations
-
 import json
 import platform
 import re
@@ -31,11 +29,9 @@ import traceback
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-
 # Response / redirect 已随零构建控制台（console.html + GET /ui）一起删掉，如无新用途别再 import
 from flask import request, send_from_directory
 from flask_restful import Resource
-
 from . import datasets as ds
 from . import tabular
 from .config import config
@@ -44,16 +40,12 @@ from .figures import FIG_DIR, clear_figures, list_figures
 from .inference import InvalidInput, predict
 from .registry import abort_artifact, begin_artifact, commit_artifact, delete_artifact, list_artifacts, load_artifact
 from .training import MODEL_META, ALIASES, normalize_model, train
-
-
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")          # 训练日志里 Keras 进度条的转义序列
 _PACKAGES = ("numpy", "pandas", "scikit-learn", "scipy", "matplotlib", "h5py", "flask",
              "flask-restful", "pymysql", "pyodbc", "tensorflow", "tf-nightly", "keras",
              "keras-nightly", "torch", "python-docx", "pywin32")
-
 MAX_EPOCHS = 200          # 防止一条 HTTP 请求把服务占住几小时
 MAX_LIMIT = 500           # 单次 /predict 最多多少窗口
-
 # ---------------- 「这是不是一个模型」探测 ----------------
 # 上传时不再要求用户填输入长度/类别数/类别标签：先按扩展名分类，再**打开文件看内容**，
 # 判断它到底是不是权重文件，并尽量把 input_len / num_classes 猜出来。
@@ -67,8 +59,6 @@ KEEP_SUFFIXES = {".json", ".npz", ".npy", ".txt", ".yaml", ".yml", ".onnx", ".cs
                  ".h5", ".keras", ".pt", ".pth", ".pkl", ".pickle"}
 # PyTorch 的输出层一般叫这些名字，用来从 state_dict 里认出"最后一层"从而读出类别数
 _HEAD_LAYER_RE = re.compile(r"(fc|classifier|linear|head|dense|out|output)\d*\.weight$")
-
-
 def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
     """从 Keras 的 model_config（dict）里挖出 input_len 与类别数（最后一个 Dense 的 units）。
 
@@ -84,7 +74,6 @@ def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
     # layers 可能缺失或不是 list（手工改过的/非 Sequential 的存档），统一成 []，
     # 后面两个循环就不用再判类型了
     layers = conf.get("layers") if isinstance(conf.get("layers"), list) else []
-
     def first_dim(shape) -> int | None:
         """取形状里第一个有意义的维度。
 
@@ -96,7 +85,6 @@ def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
         # 只认正整数维度：字符串维度名（"channels" 之类）、None（未知的 batch 维）、0 全部过滤掉
         dims = [d for d in shape[1:] if isinstance(d, int) and d > 0]
         return int(dims[0]) if dims else None
-
     input_len = None
     # 逐层扫而不是只看第一层：导出后的 config 里输入形状挂在哪一层并不固定
     for layer in layers:                                   # 输入层：Keras2 用 batch_input_shape，Keras3 用 batch_shape
@@ -119,8 +107,6 @@ def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
             units = int(lc["units"])
             break
     return input_len, units
-
-
 def probe_weight(filename: str, blob: bytes) -> dict:
     """判断一个上传文件是不是模型权重，并尽量读出 input_len / num_classes。
 
@@ -133,7 +119,6 @@ def probe_weight(filename: str, blob: bytes) -> dict:
     """
     import io
     import zipfile
-
     suffix = Path(filename).suffix.lower()
     framework = WEIGHT_SUFFIXES.get(suffix)
     result = {"ok": False, "framework": framework, "reason": "", "input_len": None, "num_classes": None}
@@ -144,7 +129,6 @@ def probe_weight(filename: str, blob: bytes) -> dict:
     if not blob:
         result["reason"] = "文件是空的（0 字节）"
         return result
-
     try:
         # ---------------- .h5 / .keras：两种 Keras 存档，用"文件头是不是 PK(zip)"区分 ----------------
         if suffix in (".h5", ".keras"):
@@ -176,7 +160,6 @@ def probe_weight(filename: str, blob: bytes) -> dict:
             result.update(ok=True, input_len=input_len, num_classes=units,
                           reason=f"Keras HDF5（顶层 {keys[:5]}，input_len={input_len}，类别数={units}）")
             return result
-
         # ---------------- .pt / .pth：torch>=1.6 存的是 zip 容器，里面必有 data.pkl ----------------
         if suffix in (".pt", ".pth"):
             if blob[:2] != b"PK":
@@ -213,7 +196,6 @@ def probe_weight(filename: str, blob: bytes) -> dict:
             result.update(ok=True, num_classes=int(head[0]) if head else None,
                           reason=f"PyTorch state_dict（{len(shapes)} 个张量，类别数={int(head[0]) if head else None}）")
             return result
-
         # ---------------- .pkl：只验 pickle 魔数，**绝不反序列化** ----------------
         # 反序列化 pickle = 执行文件里的任意代码，而这是"上传"来的文件；
         # 判断"是不是 pickle"只需要看头 1 个字节（协议 2+ 都以 0x80 开头）就够了。
@@ -226,8 +208,6 @@ def probe_weight(filename: str, blob: bytes) -> dict:
         # 坏文件、半截文件、权限问题都会落到这里。reason 会被前端逐条展示，所以要说人话。
         result["reason"] = f"读取失败，不像有效模型文件：{type(exc).__name__}: {exc}"
         return result
-
-
 def _body() -> dict:
     """请求体 JSON；不是对象（或压根不是 JSON）时返回空 dict，避免调用方到处判 None。
 
@@ -236,8 +216,6 @@ def _body() -> dict:
     """
     data = request.get_json(silent=True)
     return data if isinstance(data, dict) else {}
-
-
 def _int(value, default=None, name="参数"):
     """取整数参数：None 用默认值，转不动就抛 InvalidInput（接口据此回 400）。
 
@@ -250,8 +228,6 @@ def _int(value, default=None, name="参数"):
         return int(value)
     except (TypeError, ValueError):
         raise InvalidInput(f"{name} 必须是整数，收到 {value!r}")
-
-
 def _sanitize_name(value: str, default: str) -> str:
     """名字 → **磁盘安全形式**：非法字符换成下划线，再去掉首尾的点与下划线，为空则用 default。
 
@@ -259,8 +235,6 @@ def _sanitize_name(value: str, default: str) -> str:
     （回滚、上传落盘）用它；要求"非法就报错、不许静默改名"的路径（改模型名）用 `_safe_model_name()`。
     """
     return re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", value).strip("._") or default
-
-
 def _resolve_workspace_path(raw: str) -> Path:
     """把用户给的路径解析成**工作区内**的文件（`/datasets/table`、`/datasets/signal` 用它）。
 
@@ -284,11 +258,8 @@ def _resolve_workspace_path(raw: str) -> Path:
         if resolved.is_file():            # 目录不算命中，必须是指到文件
             return resolved
     raise InvalidInput(f"文件不存在或不在工作区内：{raw}")
-
-
 class ApiIndex(Resource):
     """GET / —— 接口索引，给人和「系统管理→接口索引」页看的自描述清单（/api 是同一个东西）。"""
-
     def get(self):
         # endpoints 由 _route_index() 从**注册表**生成，不再手抄：手抄那份已经漂过两次
         # （索引里留着早已删除的 /todos，同时漏掉 4 条真实存在的路由）。
@@ -299,15 +270,12 @@ class ApiIndex(Resource):
             # 别名表的 value 才是内部键：cnn / 算法模型1 / 模型1 等多个别名指向同一个键，所以先 set 去重
             "models": sorted(set(ALIASES.values())),
         }
-
-
 class Health(Resource):
     """GET /health —— 服务 / 数据库 / 模型产物的体检，前端顶栏每 15 秒轮询它。
 
     刻意**不抛异常**：数据库连不上也算"服务还活着"，只在 database.ok 里标失败，
     否则顶栏会显示成"服务不可用"，让人误以为整个进程挂了。
     """
-
     def get(self):
         # 探测数据库用 ping()：它内部把异常吞成 {ok: False, error: ...}，
         # 所以库挂了这里也照样能返回 200，前端只需看 database.ok
@@ -330,15 +298,12 @@ class Health(Resource):
                 "数据管线已知问题：原脚本会把越界切片补成整行 NaN；服务侧改为拒绝并回报。",
             ],
         }
-
-
 class ModelList(Resource):
     """GET /models —— 磁盘产物（artifacts）+ 库表登记（db_models）两份清单。
 
     两者故意不合并：产物可能还没登记（训练落盘后写库失败），登记也可能没有产物
     （只占位未训练），前端要能看出这种不一致。
     """
-
     def get(self):
         artifacts = list_artifacts()
         try:
@@ -353,11 +318,8 @@ class ModelList(Resource):
             # 内置模型的元数据（内部键 → 描述/类型/db_name），给前端下拉框和说明文案用
             "known_models": {name: MODEL_META[name] for name in MODEL_META},
         }
-
-
 class DatasetList(Resource):
     """数据集体检：内置 .mat 数据集 + data/datasets 下上传的表格数据集。"""
-
     def get(self):
         """把两类数据源都体检一遍。
 
@@ -404,13 +366,9 @@ class DatasetList(Resource):
                          "file_count": info.get("file_count", 0), "classes": info.get("classes", 0)})
             out[key] = info
         return out, 200
-
-
 class DatasetUpload(Resource):
     """上传表格文件到 data/datasets/<数据集名>/（一个文件 = 一个类别）。"""
-
     MAX_MB = 80
-
     def post(self):
         """保存上传的表格文件，一个文件 = 一个类别（文件名即标签）。"""
         name = (request.form.get("name") or "").strip()
@@ -455,11 +413,8 @@ class DatasetUpload(Resource):
                 "hint": ("同名文件已被覆盖：本平台约定「一个文件 = 一个类别、文件名即标签」，"
                          "覆盖会直接换掉那个类别的全部数据" if overwritten else None),
                 "listing": listing}, 200 if saved else 400
-
-
 class TablePreview(Resource):
     """表格预览：列统计 + 前 N 行 + 推荐信号列（数据展示/数据集管理都用它）。"""
-
     def get(self):
         # path 必填：表格预览只认"工作区里的表格文件"，不接受把数据内联在请求里
         raw = request.args.get("path")
@@ -486,15 +441,12 @@ class TablePreview(Resource):
             # 文件损坏/加密/列名对不上/不是数值列……统一算"这份表格读不出来"：500 但带上异常类型，便于定位
             return {"error": f"{type(exc).__name__}: {exc}"}, 500
         return data, 200
-
-
 class Train(Resource):
     """POST /train —— 训练入口。
 
     这一层只做**参数校验与归一化**（模型名、epochs、rate、dataset_dir 的路径安全），
     真正的训练在 training.train() 里同步跑完，所以本接口耗时长、不能并发压。
     """
-
     def post(self):
         body = _body()
         try:
@@ -546,22 +498,16 @@ class Train(Resource):
             # （含 InvalidInput —— 它是 ValueError 子类，两者都是"参数错 → 400 + 同一句话"，
             #   所以上面不需要再单独写一档 except InvalidInput）
             return {"error": str(exc)}, 400
-
         result = train(name, options)
         http = 200 if result["status"] == "成功" else 500
         if (result.get("db") or {}).get("written") is False:
             # 产物可能已经落盘、但库里没有 Trainings 行 —— 调用方必须知道，别只看 status
             result["warning"] = ("训练结果未写入数据库：" + str((result.get("db") or {}).get("error")))
         return result, http
-
-
 class TrainingList(Resource):
     """GET /trainings?limit=N —— 最近训练记录（读库）。"""
-
     def get(self):
         return _recent_list("trainings", database.recent_trainings)
-
-
 def _recent_list(key: str, fetch):
     """`GET /xxx?limit=N`（默认 20、上限 200）的"最近 N 条"读库接口，/trainings 与 /inference-tasks 共用。
 
@@ -587,15 +533,10 @@ def _recent_list(key: str, fetch):
     except DBError as exc:
         # 读库失败 → 503 且带上 dialect：前端提示"数据库不可用"，而不是显示成"没有记录"
         return {"error": str(exc), "dialect": database.dialect}, 503
-
-
 class TrainingList(Resource):
     """GET /trainings?limit=N —— 最近训练记录（读库）。"""
-
     def get(self):
         return _recent_list("trainings", database.recent_trainings)
-
-
 def _log_failed_inference(name: str, exc: Exception, client_ip: str | None, body: dict) -> None:
     """推理失败时也写一条 `ModelInvocations`（is_success=0）。
 
@@ -632,15 +573,12 @@ def _log_failed_inference(name: str, exc: Exception, client_ip: str | None, body
     # 调用方 Predict 会在本函数返回后 re-raise 原始异常，日志里的二次异常绝不能把它盖掉。
     except Exception:                                        # 写日志失败绝不能盖掉原始异常
         pass
-
-
 class Predict(Resource):
     """POST /predict —— 推理入口。
 
     入参既可以是 samples（内联数组），也可以是 path（工作区内的文件）；
     成功返回结构化的 predictions + summary + figures + db 回执。
     """
-
     def post(self):
         body = _body()
         try:
@@ -691,18 +629,12 @@ class Predict(Resource):
             payload["warning"] = ("推理已完成，但结果未写入数据库："
                                   + str((payload.get("db") or {}).get("error")))
         return payload, 200
-
-
 class InferenceTaskList(Resource):
     """GET /inference-tasks?limit=N —— 最近推理任务（读库）。"""
-
     def get(self):
         return _recent_list("tasks", database.recent_inference_tasks)
-
-
 class InferenceTaskDetail(Resource):
     """GET /inference-tasks/<id> —— 单个任务 + 它的 InferenceResults 明细。"""
-
     def get(self, task_id):
         # ⚠️ 路由是 /inference-tasks/<int:task_id>：Werkzeug 的 int 转换器已经保证进来的是整数，
         # 非整数路径（/inference-tasks/abc）根本不会进这个方法，会直接 404。
@@ -718,15 +650,12 @@ class InferenceTaskDetail(Resource):
         # ⚠️ 明细**不分页**：一次推理如果写了上千个窗口，这个响应就是上千行；
         #    前端要自己分页/懒渲染，或者从源头限制一次写入的结果条数
         return task
-
-
 # ------------------------------------------------------------ 模型名的"三套写法"
 # 同一个模型在不同地方有三个名字，写错一个就会"找不到模型"或"建出重复行"：
 #     1dcnn   ← 服务内部键（MODEL_META / _TRAINERS / 前端下拉的 value）
 #     1DCNN   ← Models 表里的 ModelName（给人看、也写进 SQL 的正式名）
 #     1dcnn   ← data/models/ 下的产物目录名（磁盘只认这个）
 # 下面三个函数就是三套写法之间的换算器：凡是要"拿用户输入去查东西"，先过这里。
-
 def _db_model_name(raw: str) -> str:
     """任意写法 → **Models 表里的正式名**（1dcnn / 1DCNN / cnn / 算法模型1 → 1DCNN）。
 
@@ -738,8 +667,6 @@ def _db_model_name(raw: str) -> str:
         return db_model_name(normalize_model(raw))
     except ValueError:
         return raw
-
-
 def _artifact_key(raw: str) -> str:
     """任意写法 → **产物目录名**（1DCNN → 1dcnn）。
 
@@ -748,8 +675,6 @@ def _artifact_key(raw: str) -> str:
     """
     name = _db_model_name(raw)
     return next((k for k, v in MODEL_META.items() if v["db_name"].lower() == name.lower()), name.lower())
-
-
 def _safe_model_name(name: str) -> str:
     """模型名 → **磁盘安全形式**，非法字符**直接拒绝**而不是替换（改名用）。
 
@@ -762,8 +687,6 @@ def _safe_model_name(name: str) -> str:
     if safe != name:
         raise InvalidInput(f"模型名只能含中英文、数字、_ - .（收到 {name!r}）")
     return safe
-
-
 def _rewrite_meta_model(directory: Path, model_name: str) -> None:
     """把 <目录>/meta.json 里的 `model` 字段改写成 model_name（改名与回滚共用）。
 
@@ -781,8 +704,6 @@ def _rewrite_meta_model(directory: Path, model_name: str) -> None:
     if isinstance(payload, dict):
         payload["model"] = model_name
         meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def _rename_model(old: str, new: str) -> dict:
     """模型改名的**磁盘侧**动作：搬产物目录 + 改 meta.json + 改库里已存的路径。
 
@@ -826,8 +747,6 @@ def _rename_model(old: str, new: str) -> dict:
             "path_rows_updated": paths,
             "note": ("内置模型（1DCNN/cwt_cnn/adtk）改名后不能再按老名字训练——训练模板是硬编码的；"
                      "按新名字看档案/推理不受影响") if key in MODEL_META else None}
-
-
 def _undo_rename(old: str, new: str) -> None:
     """update_model 失败时回滚 _rename_model 的副作用（目录 + meta + 路径）。
 
@@ -859,11 +778,8 @@ def _undo_rename(old: str, new: str) -> None:
         database.rename_model_paths(safe, key)
     except DBError:
         pass                                     # 回滚里的失败只能吞掉，别再抛出去盖住原始异常
-
-
 class ArtifactDetail(Resource):
     """GET /models/<model_name> —— 查看某个模型产物的 meta.json；DELETE 见下。"""
-
     def get(self, model_name):
         """取产物档案。model_name 允许任意写法（1DCNN / 1dcnn / 上传名），先归一再查。"""
         # 先过 _artifact_key()：磁盘目录只认小写内部键，1DCNN / 上传名都得换算
@@ -874,7 +790,6 @@ class ArtifactDetail(Resource):
         except ValueError as exc:
             return {"error": str(exc)}, 400
         return artifact.to_dict()
-
     def delete(self, model_name):
         """删除：?scope=artifact 删磁盘产物；?scope=record 删 Models 表登记行（带引用检查）。"""
         # 两种删除口径必须由调用方**显式选一个**：删的是磁盘产物，还是库表登记行？
@@ -894,7 +809,6 @@ class ArtifactDetail(Resource):
             return {"error": str(exc)}, 409
         except ValueError as exc:                  # 含 InvalidInput（ValueError 子类）
             return {"error": str(exc)}, 400
-
     def put(self, model_name):
         """改 Models 表的登记信息：Description / ModelType / ApiEndpoint / Status / IsActive。
 
@@ -934,8 +848,6 @@ class ArtifactDetail(Resource):
         if rename:
             result["rename"] = rename
         return result, 200
-
-
 class ModelOverview(Resource):
     """一个模型的完整档案：登记信息 + 产物参数(meta) + 最近训练 + 引用统计。
 
@@ -943,7 +855,6 @@ class ModelOverview(Resource):
     分散在 4 个地方（Models 表 / Trainings 表 / 产物 meta.json / 引用关系），
     这里合并成一个响应，前端一次请求即可，不用自己拼。
     """
-
     def get(self, model_name):
         """一个模型的完整档案：登记 + 产物参数 + 最近训练 + 引用统计，一次请求给全。"""
         # name = 库表口径（Models.ModelName）；key = 磁盘口径（小写目录名）。
@@ -951,7 +862,6 @@ class ModelOverview(Resource):
         # 与这里的 name 推导完全同源，原先就地内联只会多出一份要同步维护的副本。
         name = _db_model_name(model_name)
         key = _artifact_key(model_name)
-
         # ⚠️ 用 next(..., None) 而不是"查不到就 404"：允许"有产物但没登记"或"登记了还没训练"，
         # 档案页要能如实展示这种不一致（与 GET /models 刻意返回两份清单是同一个思路）。
         registration = next((r for r in database.models_in_db()
@@ -987,8 +897,6 @@ class ModelOverview(Resource):
             "recent_trainings": trainings,
             "references": references,
         }, 200
-
-
 class ModelUpload(Resource):
     """上传模型（文件夹，或者单个/多个文件）：落盘成 data/models/<模型名>/<版本>/ 并登记 Models 表。
 
@@ -1006,9 +914,7 @@ class ModelUpload(Resource):
     可选 scaler.npz；实在读不出 input_len 时 meta 里留 null，并在响应 warnings 里说明
     （推理侧按默认 784 处理，想固定就手动补 meta.json）。
     """
-
     MAX_MB = 500
-
     def post(self):
         """接收文件夹或若干文件，探测→落盘→登记 Models 表。
 
@@ -1023,11 +929,9 @@ class ModelUpload(Resource):
         if not files:
             return {"error": "没有收到文件（表单字段名用 file，可多选/整个文件夹）"}, 400
         safe = _sanitize_name(name, "model")
-
         # 1) 先把文件读进内存并分类，避免半途落盘
         blobs, skipped, candidates, scaler, meta_blob = _upload_blobs(
             files, KEEP_SUFFIXES, WEIGHT_SUFFIXES, self.MAX_MB)
-
         # 2) 判断"这是不是一个模型"：候选逐个做内容探测，第一个通过的当权重
         if not candidates:
             return {"error": "上传的内容里没有权重文件，不算模型（支持 .h5/.keras/.pt/.pth/.pkl/.pickle）",
@@ -1046,12 +950,10 @@ class ModelUpload(Resource):
                     "detail": probed, "skipped": skipped,
                     "hint": "支持 Keras 的 .h5/.keras（需含 model_weights 组或 config.json）、"
                             "PyTorch 的 .pt/.pth（torch 的 zip 检查点）、pickle 的 .pkl"}, 400
-
         # 2) 产物目录：一个模型一份，**重新上传 = 直接替换旧产物**（没有版本号可选）。
         #    先写进暂存目录，写完整了才换上去 —— 否则一次失败的上传会把上一份好产物毁掉。
         root, stage = begin_artifact(safe)
         replaced = (root / "meta.json").is_file()
-
         # 3) 落盘
         try:
             for filename, blob in blobs.items():
@@ -1063,7 +965,6 @@ class ModelUpload(Resource):
         except Exception as exc:
             abort_artifact(stage)                  # 只清暂存，旧产物原封不动
             return {"error": f"落盘失败，已回滚：{type(exc).__name__}: {exc}"}, 500
-
         # 4) 登记 Models 表（同名就取用，不重复插）
         model_type = {"classification": "Classification", "anomaly_detection": "AnomalyDetection",
                       "regression": "Regression"}.get(str(meta.get("task") or "").lower(), meta.get("task"))
@@ -1073,7 +974,6 @@ class ModelUpload(Resource):
                                              model_type=model_type, status="可运行")
         except DBError as exc:
             model_id, db_error = None, str(exc)
-
         warnings = []
         if replaced:
             warnings.append(f"这个模型之前已有产物，已被本次上传替换（旧产物不再保留）")
@@ -1082,7 +982,6 @@ class ModelUpload(Resource):
                             "想固定长度就在产物目录的 meta.json 里补一个 input_len")
         if meta.get("weights_file") and meta["weights_file"] != weights[0]:
             warnings.append(f"meta.json 声明的权重是 {meta['weights_file']}，探测选中的是 {weights[0]}（以 meta 为准）")
-
         return {
             "model": safe, "directory": str(root),
             "framework": meta.get("framework"), "weights": meta.get("weights_file") or weights[0],
@@ -1097,16 +996,12 @@ class ModelUpload(Resource):
             "db": {"written": db_error is None, "ModelID": model_id, "ModelName": safe, "error": db_error},
             "hint": f"现在可以在「推理」里选 {safe}（输入长度 {meta.get('input_len') or '默认 784'}）",
         }, 201
-
-
 def _uploaded_files():
     """multipart 里的文件列表：`file` 是主字段名，`files` 是同义旧写法（两个上传接口共用）。
 
     取不到就是空列表 —— 调用方据此回 400，不必自己判 None。
     """
     return request.files.getlist("file") or request.files.getlist("files")
-
-
 def _upload_blobs(files, keep_suffix, weight_whitelist, max_mb):
     """把上传的文件读进内存并按用途分堆，返回 (blobs, skipped, candidates, scaler, meta_blob)。
 
@@ -1138,8 +1033,6 @@ def _upload_blobs(files, keep_suffix, weight_whitelist, max_mb):
         if filename == "meta.json":
             meta_blob = blob
     return blobs, skipped, candidates, scaler, meta_blob
-
-
 def _upload_meta(form, safe, weights, probe, scaler, meta_blob):
     """决定落盘的 meta.json 内容，返回 (meta, generated)。
 
@@ -1162,7 +1055,6 @@ def _upload_meta(form, safe, weights, probe, scaler, meta_blob):
             if scaler:
                 meta.setdefault("scaler_file", scaler)
             return meta, False
-
     input_len = probe.get("input_len") or _int(form.get("input_len"), None, "input_len")
     num_classes = probe.get("num_classes") or _int(form.get("num_classes"), None, "num_classes")
     labels = [s.strip() for s in (form.get("labels") or "").split(",") if s.strip()]
@@ -1186,11 +1078,8 @@ def _upload_meta(form, safe, weights, probe, scaler, meta_blob):
                   "input_len": probe.get("input_len"), "num_classes": probe.get("num_classes"),
                   "reason": probe.get("reason")},
     }, True
-
-
 class ModelCreate(Resource):
     """POST /models —— 新增一条 Models 表登记（不训练，只是登记/占位）。"""
-
     def post(self):
         body = _body()
         # 两种键名都收：ModelName（库表风格，dvadmin 前端用）与 name（简化写法，脚本用）
@@ -1213,11 +1102,8 @@ class ModelCreate(Resource):
         # 201 Created，但"登记"不等于"有产物"：本接口不训练、不落盘
         #（要产物走 POST /models/upload 上传，或 POST /train 训练）
         return {"ModelID": model_id, "ModelName": name}, 201
-
-
 class ModelReferences(Resource):
     """GET /models/<model_name>/references —— 删前引用体检：被哪些表引用了多少行。"""
-
     def get(self, model_name):
         # _db_model_name() 先归一（1dcnn / 中文别名 → Models 表里的正式名 1DCNN）：
         # 库里存的是正式名，拿磁盘口径的小写名去查会永远查不到行
@@ -1231,11 +1117,8 @@ class ModelReferences(Resource):
             # ⚠️ db 层遇到"这个名字不在 Models 表里"是抛 DBError 的，这里统一映射成 404：
             # 对调用方来说"模型不存在"属于资源不存在，不是服务故障
             return {"error": str(exc)}, 404
-
-
 class FigureList(Resource):
     """GET /figures —— 列出已生成的图（训练曲线/混淆矩阵/预测分布等）。"""
-
     def get(self):
         # 先按大 limit 取回来再按 model 过滤，避免"过滤后不足 limit 条"这种别扭语义
         # ⚠️ `_int()` 转不动会抛 InvalidInput（ValueError 子类），而项目没有全局异常处理器，
@@ -1255,11 +1138,8 @@ class FigureList(Resource):
             items = [i for i in items if i["file"].startswith(f"{model}/") or f"/{model}/" in i["file"]]
         return {"count": len(items[:limit]), "figures": items[:limit],
                 "hint": "图片可直接用返回的 url 在浏览器打开（GET /figures/<路径>）"}
-
-
 class FigureFile(Resource):
     """GET /figures/<路径> —— 直接返回 PNG 文件（conditional=True 支持 304 缓存协商）。"""
-
     def get(self, relpath):
         # 直接把 PNG 交给 Flask 发文件：不用自己 open/read，还能白拿 Content-Length、ETag、
         # Range 这些头。conditional=True 让它处理 If-None-Match/If-Modified-Since → 命中时回 304，
@@ -1267,22 +1147,15 @@ class FigureFile(Resource):
         # ⚠️ relpath 直接来自 URL，穿越防护靠 send_from_directory 自己做的 safe_join
         # （规范化后若逃出 FIG_DIR 会抛 NotFound），所以别改成 Path(FIG_DIR / relpath).read_bytes() 那种写法
         return send_from_directory(FIG_DIR, relpath, conditional=True)
-
-
 # class Console(Resource)（GET /ui，零构建单页控制台）已整类删除：它每次请求读盘吐 console.html，
 # 与 Vue 前端功能重叠，属于第二套 UI。删除后 /ui 不再注册路由 → 返回 404。
 # 备注：当初路径选 /ui 而不是 /console，是因为 Flask debug=True 时 Werkzeug 调试器独占 /console。
-
-
 # 说明：原先这里还有一个 `class Root`，作用是让 `GET /` 返回与 `GET /api` 完全一样的索引
 # （`return ApiIndex().get()`）。它已删除 —— flask_restful 一个资源可以挂多个 URL，
 # 在 _ROUTES 里把 ApiIndex 同时注册到 "/" 与 "/api" 即可，少一个只为转发而存在的类。
-
-
 # ============================ 数据集管理 / 数据展示 ============================
 class DatasetDb(Resource):
     """GET/POST /datasets/db —— Datasets 表的登记记录：读 + 登记。"""
-
     def get(self):
         """列登记记录，顺带把 8 张表的行数一并返回（前端「库表登记」页要用）。"""
         # 一次请求给两样东西：Datasets 的登记行 + 各表行数（「库表登记」页要一起显示）
@@ -1293,7 +1166,6 @@ class DatasetDb(Resource):
             # ⚠️ 库连不上给 503 而不是 500，并且照样带上 dialect：前端要能显示"配的是 MySQL、但连不上"，
             # 而不是一个什么都不带的 500 —— 这类故障排查全靠这一句话
             return {"error": str(exc), "dialect": database.dialect}, 503
-
     def post(self):
         """登记一个数据集（同名则沿用已有行，响应里的 already_existed 标明是哪种）。"""
         body = _body()
@@ -1312,14 +1184,11 @@ class DatasetDb(Resource):
             return {"error": str(exc), "dialect": database.dialect}, 503
         result["dialect"] = database.dialect
         return result, 200 if result["already_existed"] else 201
-
-
 class DatasetSignal(Resource):
     """取一段原始信号（降采样成数值数组），供「数据展示」画波形。
 
     既支持内置 .mat（CWRU DE 通道），也支持表格文件（.csv/.xlsx/.xls，可指定 column/sheet）。
     """
-
     def get(self):
         """取一段原始信号（已降采样成 points 个数值）。"""
         # 入参分工：dataset 决定"去哪个目录找"、file 决定"取哪个文件"、points/start 决定"取哪一段"
@@ -1341,7 +1210,6 @@ class DatasetSignal(Resource):
             return {"error": str(exc)}, 400
         column = request.args.get("column")
         sheet = request.args.get("sheet")
-
         # 1) 目录来自 dataset 键（内置 CWRU / 上传的表格数据集）
         directory = None
         if dataset in config.dataset_dirs:
@@ -1377,7 +1245,6 @@ class DatasetSignal(Resource):
         if not path.is_file():
             # 404 且只回报文件名：这里本来就没打算把绝对路径告诉调用方（响应出口还有一层脱敏兜底）
             return {"error": f"文件不存在：{path.name}"}, 404
-
         try:
             if tabular.is_table(path):
                 # 表格：一列就是一段信号（column/sheet 由前端下拉选），标签直接用文件名推
@@ -1396,7 +1263,6 @@ class DatasetSignal(Resource):
         except Exception as exc:
             # 文件损坏、列名对不上、不是数值列……统一算"读不出来"：给 500 但带上原始异常类型，便于定位
             return {"error": f"读取信号失败：{type(exc).__name__}: {exc}"}, 500
-
         # 降采样分两步：stride = 总长//目标点数，保证"等间隔抽到的点数 ≥ points"，
         # 再 [:points] 截断成正好 points 个——比精确算步长再处理边界小数简单得多
         segment = signal[start:]
@@ -1413,12 +1279,9 @@ class DatasetSignal(Resource):
             "mean": round(float(values.mean()), 5), "std": round(float(values.std()), 5),
             "values": [round(float(v), 5) for v in values],
         }, 200
-
-
 # ================================ 系统管理 ================================
 class SystemInfo(Resource):
     """GET /system —— 运行信息：Python/平台、关键依赖版本、路径、库表行数、产物/图/日志 占用。"""
-
     def get(self):
         # 内部小工具：某个包读不到版本不能让整个 /system 500 —— 没安装算 None（前端显示"未安装"），
         # 其它异常退化成"读取失败"（安装元数据损坏之类，属于"知道有问题但不致命"）
@@ -1430,7 +1293,6 @@ class SystemInfo(Resource):
                 return None
             except Exception:                                            # pragma: no cover
                 return "读取失败"
-
         # 三块"占用统计"：产物 / 图 / 日志。产物只算权重文件的大小（meta、scaler 都是小文件，
         # 而 a.weights 才是"这个模型有多大"的答案）；图和日志则是目录里所有文件的字节数之和
         artifacts = list_artifacts()
@@ -1461,11 +1323,8 @@ class SystemInfo(Resource):
                      "total_kb": round(sum(p.stat().st_size for p in logs) / 1024, 1),
                      "dir": str(config.log_dir)},
         }, 200
-
-
 class SystemLogs(Resource):
     """GET /system/logs —— 训练日志文件列表（按修改时间倒序）。"""
-
     def get(self):
         # 倒序 = 最近写的日志排最前，前端下拉默认就落在"最近一次训练"上
         files = sorted(config.log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1474,11 +1333,8 @@ class SystemLogs(Resource):
             {"name": p.name, "size_kb": round(p.stat().st_size / 1024, 1),
              "modified": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")}
             for p in files]}, 200
-
-
 class SystemLogFile(Resource):
     """GET /system/logs/<name>?tail=N —— 看某个日志的尾部 N 行。"""
-
     def get(self, name):
         # 只接受纯文件名：挡掉 `../` 之类的路径，否则能读到日志目录之外的文件
         if Path(name).name != name:
@@ -1495,11 +1351,8 @@ class SystemLogFile(Resource):
                  for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()]
         return {"name": name, "size_kb": round(path.stat().st_size / 1024, 1),
                 "total_lines": len(lines), "returned": len(lines[-tail:]), "lines": lines[-tail:]}, 200
-
-
 class Maintenance(Resource):
     """POST /system/maintenance —— 维护操作（危险，前端红按钮 + 二次确认）。"""
-
     def post(self):
         # ⚠️ 白名单式分发：只有下面**显式写出来**的 target 才会被执行，绝不按字符串去拼函数名。
         # 新增维护动作时必须同时改这里的 if 和返回里的 supported 列表，
@@ -1510,8 +1363,6 @@ class Maintenance(Resource):
             return clear_figures(), 200
         # 白名单式：只认已知的 target，别的明确报错并回可选值
         return {"error": f"不支持的维护目标：{target!r}", "supported": ["figures"]}, 400
-
-
 # ------------------------------------------------------------------ 路由表
 # 这张表是**唯一的注册清单**，同时也是 GET /（= GET /api，「接口索引」页）的数据源。
 # 加一条路由 = 在下面加一行：注册与索引不可能再脱钩。原先两边各写一份手抄清单，实际已经漂过两次
@@ -1560,12 +1411,9 @@ _ROUTES = (
 #   Console → "/ui"（零构建控制台，前端已改为纯 Vue 页面）
 #   DatasetRecord → "/datasets/db/<int:dataset_id>"（单条登记行的查/改/删，前端只声明过
 #     updateDataset/deleteDataset 却没有任何页面调用；登记的写入仍在 POST /datasets/db）
-
 # GET /（及 /api）的索引里，各条路由的路径形态：把 Flask 的转换器写法换成更易读的占位符。
 # 只影响「接口索引」页的显示，不参与路由匹配。
 _PATH_DISPLAY = {"<int:task_id>": "<id>", "<path:relpath>": "<路径>", "<model_name>": "<model>", "<name>": "<名>"}
-
-
 def _route_index() -> dict[str, str]:
     """路径 → 用途说明，直接取各 Resource 的 docstring 首行（不再手抄一份）。
 
@@ -1583,29 +1431,21 @@ def _route_index() -> dict[str, str]:
                 show = show.replace(flask_form, readable)
             out[show] = f"{out[show]}；{desc}" if show in out else desc
     return out
-
-
 def register_api(api) -> None:
     """把 _ROUTES 里的资源挂到 flask_restful.Api 上（由 main.py 调用）。"""
     for resource, paths in _ROUTES:
         api.add_resource(resource, *paths)
-
     # ⚠️ 收尾必须调用它：脱敏挂在 app.after_request 上，跟资源注册顺序无关，
     # 但放在这里能保证"谁用 register_api 谁就自动带上出口脱敏"——漏挂一次，所有响应都在裸奔真实路径。
     # 注意这里传的是 flask_restful.Api 对象本身（_install_path_mask 内部自己取 api.app）
     _install_path_mask(api)          # 出口脱敏：响应里不再出现本机真实目录
-
     # ⚠️ 别试图用 @app.errorhandler(InvalidInput) 把各方法里的 try/except 收成一处：flask_restful
     # 先接管异常（Api.error_router → handle_error），非 HTTPException 一律变成 500，够不到 Flask。
     # 它只在 PROPAGATE_EXCEPTIONS 为真（debug/testing 打开）时才漏过去 —— 那会让同一份代码在
     # debug 与非 debug 下表现不同，比多写几行 try/except 危险。所以"参数错 → 400"就显式写在各方法里。
-
-
 # ============================================ 响应脱敏：不把本机真实目录暴露给前端
 # 只认"盘符 + 冒号 + 分隔符"（C:\ / d:/）：单字母能对上真实盘符，又能避开 http:// 这种多字母 scheme
 _DRIVE_RE = re.compile(r"[A-Za-z]:[\\/]")
-
-
 def mask_private_paths(payload, workspace: str = "", home: str = ""):
     """递归把响应里的绝对路径换成"工作区内的相对路径"。
 
@@ -1639,7 +1479,6 @@ def mask_private_paths(payload, workspace: str = "", home: str = ""):
         # 工作区之外的其它盘符统一换成 <本机>/，保留目录结构（只藏机器信息，不丢可读性）。
         # 用 lambda 而不是字符串模板：替换串以反斜杠结尾会让 re.sub 抛 "bad escape (end of pattern)"
         return _DRIVE_RE.sub(lambda _match: "<本机>/", text)
-
     def walk(node):
         """递归遍历 JSON 结构，对每个字符串套 fix()；容器原样重建，其它类型不动。"""
         # 容器一律**重建**而不是就地改：响应对象可能还被别处引用，就地改会连带污染原数据；
@@ -1651,10 +1490,7 @@ def mask_private_paths(payload, workspace: str = "", home: str = ""):
         if isinstance(node, (list, tuple)):
             return [walk(item) for item in node]
         return node
-
     return walk(payload)
-
-
 def _install_path_mask(api) -> None:
     """给 Flask app 挂一个 after_request：只处理 JSON 响应，图片/日志/SSE 原样放行。"""
     # flask_restful.Api 把 Flask app 挂在 .app 上；取不到（例如测试里塞了个假 api）就直接跳过，
@@ -1664,7 +1500,6 @@ def _install_path_mask(api) -> None:
         return
     # 这两个前缀在注册时算一次就够：after_request 每次响应都会跑，别在里面重复做 Path.home()
     workspace, home = str(config.workspace_dir), str(Path.home())
-
     @app.after_request
     def _mask_response(response):                                # noqa: ANN001
         """出口统一兜一遍脱敏，避免逐个字段改还漏掉。"""

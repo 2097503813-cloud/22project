@@ -10,9 +10,7 @@
 
 写库顺序（外键依赖）：Datasets → Models → Trainings。
 """
-
 from __future__ import annotations
-
 import contextlib
 import importlib
 import json
@@ -21,16 +19,13 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-
 import numpy as np
-
 from . import datasets as ds
 from . import tabular
 from .config import config
 from .db import DBError, database
 from .figures import training_figures
 from .registry import save_artifact
-
 # 别名表：把用户可能写的各种叫法（英文缩写 / 中文「算法模型N」/ 框架名）统一落到同一个**内部键**上。
 # 内部键同时是 data/models/<键>/ 的目录名与 _TRAINERS 的字典键，所以这张表的**值不能随便改**。
 # ⚠️ 这里就是"模型名三套写法"的源头：接口别名 →(本表) 内部键 →(MODEL_META) 库表 Models 里的名字。
@@ -53,8 +48,6 @@ MODEL_META = {
     "adtk": {"db_name": "adtk",
              "description": "时序异常检测库（无监督），以正常轴承信号为基线做 PcaAD 重构误差检测。", "type": "AnomalyDetection"},
 }
-
-
 def db_model_name(name: str) -> str:
     """内部键（1dcnn）→ 库表 Models 里的名字（1DCNN，与 schema 种子数据一致）。
 
@@ -65,8 +58,6 @@ def db_model_name(name: str) -> str:
     任何要走库的入口都必须跳完这两跳，否则就会出现"库里有行、但按内部键查不到"。
     """
     return MODEL_META.get(name, {}).get("db_name", name)
-
-
 def normalize_model(name: str | None, default: str = "1dcnn") -> str:
     """把用户写的模型名（别名 / 大小写 / 中文）规范成内部键；不认识就抛 ValueError。
 
@@ -80,8 +71,6 @@ def normalize_model(name: str | None, default: str = "1dcnn") -> str:
     if key not in ALIASES:
         raise ValueError(f"未知模型 {name!r}，可用：1dcnn / cwt_cnn / adtk")
     return ALIASES[key]
-
-
 def _seed_everything(seed: int) -> None:
     """尽力而为的随机源对齐：python random 与 numpy 立刻设，TF / torch 只在**已导入**时才设。
 
@@ -107,8 +96,6 @@ def _seed_everything(seed: int) -> None:
     if "torch" in sys.modules:
         with contextlib.suppress(Exception):
             sys.modules["torch"].manual_seed(seed)
-
-
 def _log_path(model: str) -> Path:
     """这次训练的输出文件名（起止时间靠文件名区分，内容由 train() 重定向 stdout 写入）。
 
@@ -117,8 +104,6 @@ def _log_path(model: str) -> Path:
     """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return config.log_dir / f"train-{model}-{stamp}.log"
-
-
 def _import_project_module(dir_name: str, module_name: str):
     """把项目子目录塞进 sys.path 后导入模块。
 
@@ -131,8 +116,6 @@ def _import_project_module(dir_name: str, module_name: str):
     if d not in sys.path:
         sys.path.insert(0, d)
     return importlib.import_module(module_name)
-
-
 # --------------------------------------------------------------- 数据源选择
 def resolve_source(opts: dict) -> tuple[str, Path, str]:
     """决定这次训练用哪个数据源：返回 (登记名, 目录, 类型)。
@@ -152,7 +135,6 @@ def resolve_source(opts: dict) -> tuple[str, Path, str]:
         directory = config.dataset_dirs["CWRU-0HP"]
     if not directory.is_dir():
         raise FileNotFoundError(f"数据集目录不存在：{directory}")
-
     # ② 类型怎么定：显式 dataset_type 最优先；没给就"看目录里有什么"——
     #    ⚠️ 判定顺序是**先表格、后 .mat**：一个目录里同时有两种文件时会走表格路径，
     #    .mat 被静默忽略（往 1DCNN/0HP 里丢个 csv 就会踩到），所以两种数据源建议分目录放。
@@ -164,15 +146,12 @@ def resolve_source(opts: dict) -> tuple[str, Path, str]:
             kind = "matlab"
         else:
             raise FileNotFoundError(f"{directory} 里既没有 .mat 也没有表格文件（csv/xlsx/xls）")
-
     # ③ 登记名（会写进 Datasets 表）：显式 dataset 优先，否则取目录名；内置目录用固定名，
     #    表格源补个 "(表格)" 后缀，方便在「数据集管理」页一眼区分两种来源
     name = opts.get("dataset") or (directory.name if raw_dir else "CWRU-0HP")
     if kind == "tabular" and not raw_dir:
         name = f"{name}(表格)"
     return name, directory, kind
-
-
 def load_dataset(opts: dict, length: int, number: int, stride: int, rate: list) -> tuple[str, Path, str, dict]:
     """按数据源类型加载并切窗，两个数据源共用同一套切窗/标准化/划分。"""
     name, directory, kind = resolve_source(opts)
@@ -192,8 +171,6 @@ def load_dataset(opts: dict, length: int, number: int, stride: int, rate: list) 
     else:
         data = ds.load_windows(directory, **common)
     return name, directory, kind, data
-
-
 # ============================================================ 算法模型1：1DCNN
 def _train_1dcnn(opts: dict) -> dict:
     """按原脚本的网络结构训一个 TensorFlow/Keras 1DCNN。
@@ -208,19 +185,15 @@ def _train_1dcnn(opts: dict) -> dict:
     epochs = int(opts.get("epochs", 10))
     batch_size = int(opts.get("batch_size", 128))
     seed = int(opts.get("seed", 42))
-
     dataset_name, dataset_dir, dataset_kind, data = load_dataset(opts, length, number, stride, rate)
-
     mod = _import_project_module("1DCNN", "1DCNN")      # 复用原脚本的网络结构（同时把 TF 导进来）
     import tensorflow.keras as keras
     _seed_everything(seed)
-
     # 三个数据集从 (n, length) 变成 (n, length, 1)：Conv1D 要求最后一维是通道数，
     # 而振动信号只有 1 个通道。astype("float32") 与 Keras 默认精度对齐（用 float64 会慢近一倍）。
     x_train = data["X_train"].reshape(-1, length, 1).astype("float32")
     x_valid = data["X_valid"].reshape(-1, length, 1).astype("float32")
     x_test = data["X_test"].reshape(-1, length, 1).astype("float32")
-
     # 原脚本的网络输出层是硬编码的 Dense(10)（`1DCNN/1DCNN.py`），先挡住"类别数 > 10"，
     # 否则会训练到一半抛 "label value ... outside the valid range of [0, 10)" —— 那种报错
     # 完全看不出根因是网络结构写死的。类别数 < 10 可以正常跑（多出来的输出单元用不到）。
@@ -228,7 +201,6 @@ def _train_1dcnn(opts: dict) -> dict:
         raise ValueError(f"1DCNN 的输出层在原脚本里写死了 10 类（Dense(10)），"
                          f"而当前数据集有 {len(data['labels'])} 类；请改用 cwt_cnn，"
                          f"或把 1DCNN/1DCNN.py 的输出层改成按类别数动态生成")
-
     # 网络结构**直接复用原项目脚本**（importlib 导入 mod.mymodel），保证与既有实验结果同源；
     # 代价是它把输出层写死 10 类，所以上面那道守卫不能删。
     model = mod.mymodel(x_train)
@@ -245,12 +217,10 @@ def _train_1dcnn(opts: dict) -> dict:
     report = classification_report(data["y_test"], y_pred, digits=4, zero_division=0)
     per_class = classification_report(data["y_test"], y_pred, digits=4, zero_division=0, output_dict=True)
     confusion = confusion_matrix(data["y_test"], y_pred).tolist()   # 出混淆矩阵图用
-
     # 某类"测试窗口为 0"时必须显式回报：例如 IR014 只有 63788 点、180 个测试窗全被跳过，
     # accuracy 就只在剩下的类上算 —— 不报出来，指标就是静默虚高的。
     tested = set(np.asarray(data["y_test"]).tolist())
     untested_labels = [label for index, label in enumerate(data["labels"]) if index not in tested]
-
     def saver(target: Path) -> Path:
         """优先存 Keras 原生 .keras（zip）；若环境禁止在临时子目录里写文件导致
         PermissionError（受限沙箱常见），自动回退到 h5py 直写的 .h5。两种格式
@@ -270,7 +240,6 @@ def _train_1dcnn(opts: dict) -> dict:
             legacy = target / "model.h5"
             model.save(legacy)
             return legacy
-
     return {
         "framework": "tensorflow-keras",
         "task": "classification",
@@ -301,8 +270,6 @@ def _train_1dcnn(opts: dict) -> dict:
         "scaler_file": "scaler.npz" if data["scaler"] is not None else None,
         "saver": saver,
     }
-
-
 # ========================================================= 算法模型2：cwt_cnn
 def _train_cwt_cnn(opts: dict) -> dict:
     """与 1DCNN 同任务的 PyTorch 实现，额外产出混淆矩阵所需的原始预测。
@@ -319,14 +286,11 @@ def _train_cwt_cnn(opts: dict) -> dict:
     epochs = int(opts.get("epochs", 50))
     lr = float(opts.get("lr", 1e-3))
     seed = int(opts.get("seed", 42))
-
     # 数据源解析与切窗复用同一套（matlab/表格都支持），返回的 data 里已经切好 train/valid/test
     dataset_name, dataset_dir, dataset_kind, data = load_dataset(opts, length, number, stride, rate)
-
     mod = _import_project_module("cwt_cnn", "cwt_cnn_pytorch")   # 复用原项目的网络与训练循环
     import torch
     _seed_everything(seed)          # 必须在 build_model 之前调用，否则权重初值不可复现
-
     # 设备：有 GPU 就用（本项目在 CPU 上跑，50 轮约 25 秒）
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # ⚠️ 张量形状与 1DCNN **相反**：PyTorch 的 Conv1d 是"通道在前"，
@@ -335,7 +299,6 @@ def _train_cwt_cnn(opts: dict) -> dict:
     y_train = torch.tensor(data["y_train"].astype(np.int64), dtype=torch.long).to(device)
     x_test = torch.tensor(data["X_test"].reshape(-1, 1, length), dtype=torch.float32).to(device)
     y_test = torch.tensor(data["y_test"].astype(np.int64), dtype=torch.long).to(device)
-
     # 模型结构与训练循环都在原脚本里（build_model / train_model / evaluate），本函数只做编排；
     # 类别数是**动态传入**的（不像 1DCNN 那样写死 10），所以表格数据集类别数变化也能用。
     model = mod.build_model(num_classes=len(data["labels"]), length=length).to(device)
@@ -345,14 +308,12 @@ def _train_cwt_cnn(opts: dict) -> dict:
     # 注意 X_valid 在这里**没有被使用**：它既不参与训练也不参与早停，
     # 因此 metrics 里 val_accuracy/val_loss 恒为 None（前端那两栏会显示"—"）
     accuracy, report = mod.evaluate(model, x_test, y_test, device=device)
-
     # 出一张混淆矩阵图需要原始预测；evaluate 只回文本报告，这里再取一次预测
     from sklearn.metrics import classification_report, confusion_matrix
     y_true_np = y_test.cpu().numpy()
     y_pred_np = mod.predict(model, x_test, device=device)
     per_class = classification_report(y_true_np, y_pred_np, digits=4, zero_division=0, output_dict=True)
     confusion = confusion_matrix(y_true_np, y_pred_np).tolist()
-
     def saver(target: Path) -> Path:
         """落盘回调（由 registry.save_artifact 调用）：先存标准化参数，再存网络权重。
 
@@ -364,7 +325,6 @@ def _train_cwt_cnn(opts: dict) -> dict:
         torch.save({"state_dict": model.state_dict(), "length": length,
                     "num_classes": len(data["labels"])}, path)
         return path
-
     return {
         "framework": "pytorch",
         "task": "classification",
@@ -390,8 +350,6 @@ def _train_cwt_cnn(opts: dict) -> dict:
         "scaler_file": "scaler.npz" if data["scaler"] is not None else None,
         "saver": saver,
     }
-
-
 # =========================================================== 算法模型3：adtk
 def adtk_slice_windows(signal: np.ndarray, length: int, number: int, stride: int) -> np.ndarray:
     """把一段长信号切成 (number, length) 的窗口矩阵（不够一个窗就停，不补零）。
@@ -410,8 +368,6 @@ def adtk_slice_windows(signal: np.ndarray, length: int, number: int, stride: int
             break
         windows.append(np.asarray(window, dtype=float))
     return np.asarray(windows) if windows else np.zeros((0, int(length)), dtype=float)
-
-
 def adtk_window_features(window: np.ndarray, sampling_rate: float, bands: int = 6) -> np.ndarray:
     """一个窗口 → 特征向量：时域 4 个统计量 + `bands` 个频带能量比。
 
@@ -434,8 +390,6 @@ def adtk_window_features(window: np.ndarray, sampling_rate: float, bands: int = 
     energy = np.array([spectrum[(freqs >= lo) & (freqs < hi)].sum() for lo, hi in zip(edges[:-1], edges[1:])])
     energy = energy / (energy.sum() + 1e-12)
     return np.concatenate([[rms, kurtosis, skewness, peak / rms], energy])
-
-
 def _train_adtk(opts: dict) -> dict:
     """无监督路线：把「正常」信号切成窗口，**窗口当样本**，fit adtk 的 PcaAD。
 
@@ -446,11 +400,9 @@ def _train_adtk(opts: dict) -> dict:
     改成行 = 窗口之后：连续重构误差 AUC = 1.0000，adtk 自带的 IQR 判据就能做到 0% 误报 / 100% 命中。
     """
     import pickle
-
     import pandas as pd
     adtk_detector = importlib.import_module("adtk.detector")
     adtk_transformer = importlib.import_module("adtk.transformer")
-
     k = int(opts.get("k", 4))
     c = float(opts.get("c", 5.0))
     detector_name = str(opts.get("detector", "PcaAD"))
@@ -466,7 +418,6 @@ def _train_adtk(opts: dict) -> dict:
         raise ValueError(f"baseline_file 只能是文件名（不能带路径）：{baseline_file!r}")
     # 支持 dataset_dir：以前这里硬用 CWRU-0HP，用户在前端选了别的数据集也会被静默忽略
     dataset_dir = Path(opts.get("dataset_dir") or config.dataset_dirs["CWRU-0HP"])
-
     if dataset_dir.is_dir() and (dataset_dir / baseline_file).is_file():
         signal = ds.read_de_channel(dataset_dir / baseline_file)
         baseline_source = str(dataset_dir / baseline_file)
@@ -478,7 +429,6 @@ def _train_adtk(opts: dict) -> dict:
         # 现在直接报错，把数据来源问题暴露出来。
         raise ValueError(f"找不到基线文件 {dataset_dir / baseline_file}；"
                          f"adtk 需要一个「正常」样本文件当基线（默认 normal_0_97.mat）")
-
     signal = np.asarray(signal, dtype=float)[: int(opts.get("max_points", 400000))]
     windows = adtk_slice_windows(signal, length, number, stride)
     if windows.shape[0] < 20:
@@ -488,7 +438,6 @@ def _train_adtk(opts: dict) -> dict:
         [adtk_window_features(window, sampling_rate) for window in windows])
     frame = pd.DataFrame(features, index=pd.date_range("2017-01-01", periods=features.shape[0], freq="s"))
     _seed_everything(int(opts.get("seed", 42)))
-
     # ---- 拟合与标定用**不同**的窗口：前 70% 拟合 PCA，后 30% 定阈值 ----
     # 以前是"在同一批窗口上既拟合、又取自己的分位数当阈值"，于是 baseline_false_positive_rate
     # 按构造必然 ≈ (1-quantile)，那是自证不是验证。留出一段没参与拟合的窗口，误报率才有意义。
@@ -497,7 +446,6 @@ def _train_adtk(opts: dict) -> dict:
         split = features.shape[0]
     fit_frame, holdout_frame = frame.iloc[:split], frame.iloc[split:]
     calibrate_frame = holdout_frame if len(holdout_frame) else fit_frame
-
     # 原先这里还有一段"把 project_dir 插进 sys.path"的代码，其实完全是空转：
     # adtk 是 venv 里装的第三方包（不是项目子目录），上面 451 行就已经 import 成功了，
     # 而 main.py 启动时早已把 project_dir 追加进 sys.path。删掉不影响任何导入路径。
@@ -506,7 +454,6 @@ def _train_adtk(opts: dict) -> dict:
     detector.fit(fit_frame)
     transformer = adtk_transformer.PcaReconstructionError(k=k)     # 连续分数 = PcaAD 的第一步
     transformer.fit(fit_frame)
-
     # ---- 阈值标定：分位数取自拟合窗口，误报率在**留出**窗口上算 ----
     fit_scores = np.asarray(transformer.transform(fit_frame), dtype=float).ravel()
     cal_scores = np.asarray(transformer.transform(calibrate_frame), dtype=float).ravel()
@@ -516,7 +463,6 @@ def _train_adtk(opts: dict) -> dict:
         adtk_flag_rate = float(np.asarray(detector.detect(calibrate_frame)).ravel().astype(bool).mean())
     except Exception:                                            # noqa: BLE001
         adtk_flag_rate = None
-
     def saver(target: Path) -> Path:
         """落盘回调：标准化参数 + 检测器/连续分数器 + 全部标定信息。
 
@@ -534,7 +480,6 @@ def _train_adtk(opts: dict) -> dict:
                          "baseline_source": baseline_source, "baseline_windows": int(features.shape[0]),
                          "columns": list(frame.columns)}, fh)
         return path
-
     return {
         "framework": "adtk",
         "task": "anomaly_detection",
@@ -560,13 +505,9 @@ def _train_adtk(opts: dict) -> dict:
         "scaler_file": None,
         "saver": saver,
     }
-
-
 # ================================================================== 统一入口
 # 内部键 → 训练函数的分派表：键必须与 ALIASES 的值、data/models/<目录名> 三处严格一致（见文件头 ALIASES 的说明）
 _TRAINERS = {"1dcnn": _train_1dcnn, "cwt_cnn": _train_cwt_cnn, "adtk": _train_adtk}
-
-
 def train(model: str | None = None, options: dict | None = None) -> dict:
     """训练一个模型：跑训练 → 落盘产物 → 出图 → 按外键顺序写库，最后返回一份可读报告。
 
@@ -585,7 +526,6 @@ def train(model: str | None = None, options: dict | None = None) -> dict:
     log_path = _log_path(name)
     result: dict = {"model": name, "status": "失败", "started_at": started.isoformat(timespec="seconds"),
                     "log_file": str(log_path)}
-
     try:
         # ① 训练：把 stdout 重定向进日志文件。这样 Keras/PyTorch 的进度条与 trainer 里 print
         #    的中间信息全进 data/logs/train-<模型>-<时间戳>.log，出问题能完整回放，
@@ -593,7 +533,6 @@ def train(model: str | None = None, options: dict | None = None) -> dict:
         with open(log_path, "w", encoding="utf-8") as log, contextlib.redirect_stdout(log):
             print(f"=== /train {name} 参数：{json.dumps(options, ensure_ascii=False, default=str)}\n")
             payload = _TRAINERS[name](options)      # 三个 trainer 之一，返回结构统一的 payload
-
         # ② 落盘：saver 是 trainer 塞进 payload 的回调，各框架保存方式不同（.h5/.pt/pickle），
         #    由 trainer 决定怎么写；这里只管"产物目录 + meta.json + 失败回滚"这套公共约定。
         #    lib 里的字段全是"产物自解释"所必需的：input_len 决定推理切多长的窗，
@@ -640,7 +579,6 @@ def train(model: str | None = None, options: dict | None = None) -> dict:
     completed = datetime.now()
     result["completed_at"] = completed.isoformat(timespec="seconds")
     result["duration_sec"] = round((completed - started).total_seconds(), 2)
-
     # ---- 写库：严格按外键顺序，DB 不可用时降级但显式回报 ----
     db_info: dict = {"written": False}
     artifact_dict = result.get("artifact") or {}

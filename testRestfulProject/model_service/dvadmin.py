@@ -27,13 +27,9 @@ frontend/22project 启动时会打一组 Django 接口；这里用 Flask 把**�
   * ⚠️ 这里的返回值字段名是**照着前端源码反推**出来的，不是照着 Django 后端文档写的；
     少一个字段前端往往会静默走错分支（页面空白/不跳转），改动前先看对应的前端文件。
 """
-
 from __future__ import annotations
-
 import uuid
-
 from flask import Blueprint, jsonify, request
-
 # 五个模块（后端控制路由：前端的 dynamicRoutes[0].children 会被这份数据替换）
 def _menu_payload() -> list[dict]:
     """下发侧边栏菜单（真正的"后端控制路由"）。
@@ -57,8 +53,6 @@ def _menu_payload() -> list[dict]:
         "visible": True, "cache": False, "is_affix": affix, "is_iframe": False,
         "is_catalog": False, "is_link": False, "link_url": "",
     } for mid, title, icon, path, comp_name, component, affix in modules]
-
-
 def _ok(data=None, msg: str = "success"):
     """dvadmin 信封：{code, data, msg}，code=2000 表示成功（前端 axios 拦截器按这个判断）。
 
@@ -67,8 +61,6 @@ def _ok(data=None, msg: str = "success"):
     否则前端的错误提示分支拿不到 msg。所以别按 REST 习惯去改这里的状态码。
     """
     return jsonify({"code": 2000, "data": data, "msg": msg})
-
-
 def _user_payload() -> dict:
     """本地演示账号。字段名要跟前端 user store 的期望对齐，缺字段会导致页头/权限判断报错。"""
     return {
@@ -79,12 +71,9 @@ def _user_payload() -> dict:
         "roles": ["admin"], "is_superuser": True, "pwd_change_count": 1,
         "description": "本地演示账号（由 model_service 兼容层提供）",
     }
-
-
 def build_blueprint() -> Blueprint:
     """把 dvadmin 需要的最小接口集合装进一个 Blueprint。"""
     bp = Blueprint("dvadmin", __name__)
-
     @bp.post("/api/login/")
     def login():
         """登录：只做形式校验（任意非空账号口令都通过），返回 user + 两个 token。"""
@@ -101,17 +90,14 @@ def build_blueprint() -> Blueprint:
         data.update({"access": uuid.uuid4().hex, "refresh": uuid.uuid4().hex,
                      "username": username, "pwd_change_count": 1})
         return _ok(data, "登录成功")
-
     @bp.post("/api/logout/")
     def logout():
         """退出。没有会话要清，直接把前端领到"已退出"分支即可。"""
         return _ok(None, "已退出")
-
     @bp.get("/api/system/user/user_info/")
     def user_info():
         """当前登录用户信息（前端每次刷新都会拉一次）。"""
         return _ok(_user_payload())
-
     @bp.post("/api/system/user/update_user_info/")
     @bp.put("/api/system/user/update_user_info/")
     def update_user_info():
@@ -119,14 +105,12 @@ def build_blueprint() -> Blueprint:
         data = dict(_user_payload())
         data.update(request.get_json(silent=True) or {})
         return _ok(data, "已更新（本地演示不会真的落库）")
-
     @bp.post("/api/system/user/change_password/")
     @bp.put("/api/system/user/change_password/")
     @bp.post("/api/system/user/login_change_password/")
     def change_password():
         """改密码：三个路由都指向这里，统一回复成功，避免前端弹错。"""
         return _ok(None, "本地演示环境不需要改密码")
-
     @bp.post("/api/system/file/")
     def upload_file():
         """文件/头像上传（前端 `personal/api.ts` 的 uploadAvatar 打的就是这里）。
@@ -143,7 +127,6 @@ def build_blueprint() -> Blueprint:
         """
         import time
         from pathlib import Path
-
         from .config import config
         item = request.files.get("file") or request.files.get("files")
         if item is None and request.files:
@@ -158,12 +141,10 @@ def build_blueprint() -> Blueprint:
         (target_dir / stored).write_bytes(item.read())
         return _ok({"url": f"/media/uploads/{stored}", "name": item.filename,
                     "file_name": stored, "size": (target_dir / stored).stat().st_size})
-
     @bp.get("/api/system/menu/web_router/")
     def web_router():
         """动态菜单：后端控制路由的入口。"""
         return _ok(_menu_payload())
-
     @bp.get("/sse/")
     def sse_stub():
         """dvadmin 的站内消息推送（前端用 EventSource 连 /sse/?token=...）。
@@ -176,12 +157,10 @@ def build_blueprint() -> Blueprint:
         """
         return "retry: 3600000\n\n", 200, {"Content-Type": "text/event-stream",
                                            "Cache-Control": "no-cache"}
-
     @bp.get("/api/init/dictionary/")
     def dictionary():
         """数据字典。data 必须是**数组**（前端会 forEach/映射）。"""
         return _ok([], "本地演示环境暂无字典数据")
-
     @bp.get("/api/init/settings/")
     def settings():
         """系统设置。前端把这个对象直接当字典读，例如 systemConfig['base.captcha_state']。
@@ -191,7 +170,6 @@ def build_blueprint() -> Blueprint:
         """
         return _ok({"base.captcha_state": False, "base.site_name": "东风设备轴承故障诊断平台",
                     "base.login_title": "东风设备轴承故障诊断平台"})
-
     @bp.get("/api/system/menu_button/menu_button_all_permission/")
     def menu_button_all_permission():
         """按钮级权限清单：本地演示不做权限，回空数组。
@@ -199,13 +177,11 @@ def build_blueprint() -> Blueprint:
         ⚠️ 必须是**数组**（`data` 会被前端逐条 forEach），回成对象或 null 会在控制台抛错。
         """
         return _ok([], "本地演示环境不做按钮级权限")
-
     @bp.get("/api/system/message_center/get_newest_msg/")
     @bp.get("/api/system/message_center/get_self_receive/")
     def message_center():
         """站内消息：两个路由合并，固定回空数组。"""
         return _ok([], "无消息")
-
     @bp.get("/api/captcha/")
     def captcha():
         """验证码：captcha_state=false 时登录页不显示验证码框（本地演示不需要人机校验）。
@@ -214,12 +190,10 @@ def build_blueprint() -> Blueprint:
         key/image_base64 给 None 是让"显示验证码"的分支即使被走到也不会拿 undefined 去渲染 img。
         """
         return _ok({"captcha_state": False, "key": None, "image_base64": None})
-
     @bp.get("/api/system/system_config/get_table_data/")
     def system_config():
         """系统配置表（另一条取配置的路径，与 /api/init/settings/ 给同样的值）。"""
         return _ok({"base.captcha_state": False, "base.site_name": "东风设备轴承故障诊断平台"})
-
     @bp.get("/api/system/dept/all_dept/")
     @bp.get("/api/system/dept/dept_all/")
     def all_dept():
@@ -232,12 +206,10 @@ def build_blueprint() -> Blueprint:
         """
         return _ok([{"id": 1, "parent": None, "name": "东风设备轴承故障诊断平台",
                      "dept_name": "东风设备轴承故障诊断平台", "key": 1, "owner": [], "status": True}])
-
     @bp.get("/api/dvadmin3_social_oauth2/backend/get_login_backend/")
     def login_backend():
         """第三方登录后端列表：空数组 = 登录页不显示第三方登录入口。"""
         return _ok([], "未启用第三方登录")
-
     @bp.get("/api/system/role/")
     @bp.get("/api/system/user/")
     @bp.get("/api/system/area/")
@@ -248,10 +220,7 @@ def build_blueprint() -> Blueprint:
         直接回数组前端取不到 results 会直接报错，回空也必须是这个形状。
         """
         return _ok({"results": [], "total": 0}, "本地演示环境暂无数据")
-
     return bp
-
-
 def register_dvadmin(app) -> None:
     """注册兼容接口，并给**整个应用**装上 CORS（前端 8080 → 本服务 5000 是跨域）。
 
@@ -259,7 +228,6 @@ def register_dvadmin(app) -> None:
     是全局钩子，越早装上越能覆盖后续注册的所有路由。
     """
     app.register_blueprint(build_blueprint())
-
     @app.get("/media/<path:relpath>")
     def uploaded_media(relpath):
         """上传文件的静态访问入口（头像 <img src> 指向这里）。
@@ -272,12 +240,10 @@ def register_dvadmin(app) -> None:
         /api/media/... 的幽灵规则，正是"头像破图"的成因。现在全局只此一处。
         """
         from flask import send_from_directory
-
         from .config import config
         # 挂 data/ 而不是 data/uploads/：上传返回的是 /media/uploads/<文件>，
         # 若把 uploads 目录本身挂在 /media 下，就会去找 uploads/uploads/<文件> → 404（头像破图）
         return send_from_directory(config.upload_dir.parent, relpath)
-
     @app.before_request
     def _preflight():
         """所有 OPTIONS 预检直接回 2xx（CORS 头由下面的 after_request 补）。
@@ -294,7 +260,6 @@ def register_dvadmin(app) -> None:
         if request.method == "OPTIONS":
             return "", 200
         return None
-
     @app.after_request
     def _cors(response):                       # noqa: ANN001
         """给**所有**响应补 CORS 头，一个都不能漏。
@@ -316,7 +281,6 @@ def register_dvadmin(app) -> None:
             "Access-Control-Request-Headers", "Content-Type,Authorization")
         response.headers["Access-Control-Max-Age"] = "86400"   # 预检结果缓存一天，少一轮往返
         return response
-
     @app.errorhandler(404)
     def _not_found(err):                       # noqa: ANN001
         """**任何**未匹配的路径都回 JSON 404（不再是 Flask 默认的 HTML 页面）。
@@ -340,4 +304,3 @@ def register_dvadmin(app) -> None:
             "data": None,
             "msg": f"未找到该路径：{request.path}",
         }), 404
-

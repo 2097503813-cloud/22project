@@ -20,9 +20,7 @@
 
 写库失败一律抛 DBUnavailable / DBError，由上层决定「降级但显式回报」，不允许静默吞掉。
 """
-
 from __future__ import annotations
-
 import json
 import re
 import threading
@@ -30,23 +28,14 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-
 from .config import config
-
-
 class DBError(RuntimeError):
     """数据库层通用错误。"""
-
-
 class DBUnavailable(DBError):
     """连不上或驱动缺失——上层据此降级并回报，而不是静默忽略。"""
-
-
 def _now() -> str:
     """统一时间戳格式：MySQL 能解析的字符串（截断到毫秒）。"""
     return datetime.now().isoformat(sep=" ", timespec="milliseconds")
-
-
 def _dump_json(value):
     """落 LONGTEXT 前的 JSON 文本；None 保持 SQL NULL（**不**写成字符串 "null"）。
 
@@ -55,23 +44,17 @@ def _dump_json(value):
     default=str 兜住 datetime 之类的非标准类型：审计日志不值得为一个字段 500。
     """
     return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
-
-
 def _bit(value):
     """TINYINT(1) 列的值：None 保持 NULL，其余显式转 1/0。
 
     不能直接塞 True/False：不同驱动对 bool 的处理不一致，落库取值会漂。
     """
     return None if value is None else (1 if value else 0)
-
-
 def _strip_sql_comments(text: str) -> str:
     """去掉 /* */ 块注释与整行的 -- 行注释，好按分号安全切分脚本。"""
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     text = re.sub(r"^\s*--.*$", "", text, flags=re.M)
     return text
-
-
 def _statements(sql: str) -> list[str]:
     """把建表脚本切成一条条可执行的 SQL（按分号切，切之前先去掉注释，避免注释里的分号捣乱）。
 
@@ -79,8 +62,6 @@ def _statements(sql: str) -> list[str]:
     ⚠️ 它是"裸切"，如果哪天在字符串字面量里写了分号或 `--`，会被切错——建表脚本里保持别这么写。
     """
     return [s.strip() for s in _strip_sql_comments(sql).split(";") if s.strip()]
-
-
 def _clip(value, limit: int):
     """按列宽截断，避免超长文本直接触发数据库报错。
 
@@ -92,8 +73,6 @@ def _clip(value, limit: int):
     if isinstance(value, str) and len(value) > limit:
         return value[:limit - 3] + "..."
     return value
-
-
 def _jsonable(value):
     """把驱动返回的对象转成可 JSON 序列化的值。
 
@@ -110,8 +89,6 @@ def _jsonable(value):
     if isinstance(value, date):
         return value.isoformat()
     return value
-
-
 class Database:
     """数据库门面（**只用 MySQL**）：连接按线程复用、幂等建表、写入与回读。
 
@@ -120,7 +97,6 @@ class Database:
     `PRAGMA foreign_keys`…），维护成本远大于收益，现已统一到 MySQL，
     其他方言在 config 与这里各挡一次。
     """
-
     def __init__(self, cfg=config) -> None:
         """准备连接缓存与行数缓存；方言不是 MySQL 就直接失败（不猜、不降级）。"""
         self.cfg = cfg
@@ -131,13 +107,11 @@ class Database:
         self.last_bootstrap = None      # 记录「顺便建了库/表」的事实，供 /health 展示
         self._local = threading.local()  # 每线程复用一个连接（之前是每个请求都新建连接）
         self._counts_cache = {"at": 0.0, "data": None}
-
     # ------------------------------------------------------------------ 连接
     @property
     def placeholder(self) -> str:
         """参数占位符：MySQL 用 %s（sqlite/SQL Server 的 `?` 分支已移除）。"""
         return "%s"
-
     def _ping(self, conn) -> bool:
         """探活：连接超时或数据库重启过时会失败，调用方据此决定重连。"""
         try:
@@ -145,7 +119,6 @@ class Database:
             return True
         except Exception:
             return False
-
     def _connect(self, require_db: bool = True):
         """取本线程的连接（存在 threading.local 里）；require_db=False 时连到 master（建库前用）。
 
@@ -166,7 +139,6 @@ class Database:
         self._local.conn = conn
         self._local.req_db = require_db
         return conn
-
     def _connect_new(self, require_db: bool = True):
         """建立 MySQL 连接；缺驱动 / 连不上统一抛 DBUnavailable（调用方据此降级）。
 
@@ -187,7 +159,6 @@ class Database:
         except Exception as exc:
             raise DBUnavailable(
                 f"MySQL 连接失败({cfg.db_host}:{cfg.db_port}/{cfg.db_name if require_db else '-'})：{exc}") from exc
-
     @contextmanager
     def cursor(self, commit: bool = False):
         """借出一个游标；块内正常结束才按 commit 决定提交，异常回滚并把原异常抛出去。
@@ -218,7 +189,6 @@ class Database:
                 cur.close()
             except Exception:
                 pass
-
     # -------------------------------------------------------------- 建表/体检
     def ensure_schema(self) -> None:
         """幂等建表（**只用 MySQL**）：执行 sql/schema_mysql.sql。
@@ -227,7 +197,6 @@ class Database:
         """
         if self._schema_ready:
             return
-
         # 只用 MySQL：执行 schema_mysql.sql（库不存在就顺手建；脚本可重复执行）
         sql = (self.cfg.sql_dir / "schema_mysql.sql").read_text(encoding="utf-8")
         try:
@@ -242,9 +211,7 @@ class Database:
             conn.commit()
         finally:
             conn.close()
-
         self._schema_ready = True
-
     def ping(self) -> dict:
         """体检：顺便建表 + 取行数，**永远返回 dict 不抛异常**（/health 靠它保持可用）。"""
         try:
@@ -256,12 +223,10 @@ class Database:
         except Exception as exc:
             return {"ok": False, "dialect": self.dialect, "error": str(exc),
                     "target": f"{self.cfg.db_host}:{self.cfg.db_port}/{self.cfg.db_name}"}
-
     # ------------------------------------------------------------------ 写入
     def _ph(self, n: int) -> str:
         """生成 n 个占位符并用逗号连起来，如 "%s, %s, %s"（VALUES 子句用）。"""
         return ", ".join([self.placeholder] * n)
-
     def _insert_sql(self, table: str, cols: tuple[str, ...]) -> str:
         """拼一条 INSERT：**列名只写一遍**，占位符个数由 len(cols) 推出。
 
@@ -269,12 +234,10 @@ class Database:
         就得到一个只在运行时才炸的 "Column count doesn't match value count"。
         """
         return f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({self._ph(len(cols))})"
-
     def _insert_cur(self, cur, table: str, cols: tuple[str, ...], values: tuple) -> int:
         """在该游标上 INSERT 一行并返回自增主键。只管执行、不管事务（事务归调用方的 cursor()）。"""
         cur.execute(self._insert_sql(table, cols), values)
         return int(cur.lastrowid)
-
     def _find_id(self, cur, table: str, pk_col: str, name_col: str, name: str) -> int | None:
         """按"名字列"查主键，查不到返回 None（不抛异常）。
 
@@ -285,7 +248,6 @@ class Database:
         cur.execute(f"SELECT {pk_col} FROM {table} WHERE {name_col} = {self.placeholder}", (name,))
         row = cur.fetchone()
         return int(row[0]) if row else None
-
     def ensure_dataset(self, name: str, source: str | None = None, sample_count: int | None = None,
                        class_count: int | None = None, data_path: str | None = None,
                        description: str | None = None) -> int:
@@ -309,7 +271,6 @@ class Database:
                 (name, _clip(source, 200), sample_count, class_count, _clip(data_path, 500),
                  _clip(description, 500), _now()),
             )
-
     def ensure_model(self, name: str, description: str | None = None, model_type: str | None = None,
                      api_endpoint: str | None = "/predict", status: str | None = "可运行") -> int:
         """② Models：有就取、没有就建（幂等），返回 ModelID 主键。
@@ -330,7 +291,6 @@ class Database:
                 (name, _clip(description, 500), _clip(api_endpoint, 255), _clip(model_type, 50), _now(), 1,
                  _clip(status, 20)),
             )
-
     def insert_training(self, model_id: int, dataset_id: int | None, train_name: str,
                         epochs: int | None, batch_size: int | None, accuracy: float | None,
                         loss: float | None, model_path: str | None, status: str,
@@ -353,7 +313,6 @@ class Database:
                  _clip(model_path, 500), _clip(status, 20), _now(), started, completed,
                  _clip(created_by, 100), _clip(remark, 500)),
             )
-
     def insert_invocation(self, model_id: int, training_id: int | None, api_endpoint: str,
                           request_params, response_result=None, duration_ms: int | None = None,
                           is_success: bool | None = None, status_code: int | None = None,
@@ -377,7 +336,6 @@ class Database:
                  duration_ms, _bit(is_success), status_code,
                  error_message, _clip(client_ip, 50), _clip(status, 20), _now()),
             )
-
     def _insert_task_cur(self, cur, training_id: int, target_dataset_id: int, task_name: str,
                          task_type: str, status: str, inference_params=None, result_summary=None,
                          error_message: str | None = None, model_id: int | None = None,
@@ -401,7 +359,6 @@ class Database:
              error_message, None, model_id, None, _clip(input_path, 500), _clip(output_path, 500), progress,
              _now(), started, completed, _clip(created_by, 100)),
         )
-
     def _insert_results_cur(self, cur, task_id: int, rows: list[dict]) -> int:
         """⑥ InferenceResults 的 SQL 本体（同上复用），返回写入行数。
 
@@ -431,7 +388,6 @@ class Database:
                 now,
             ))
         return len(rows)
-
     def insert_task_with_results(self, task_kwargs: dict, rows: list[dict]) -> tuple[int, int]:
         """⑤+⑥ **同一个事务**写完任务与全部结果，返回 (task_id, 结果行数)。
 
@@ -445,7 +401,6 @@ class Database:
         with self.cursor(commit=True) as cur:
             task_id = self._insert_task_cur(cur, **task_kwargs)
             return task_id, self._insert_results_cur(cur, task_id, rows)
-
     # ------------------------------------------------------------------ 读取
     def _rows_to_dicts(self, cur) -> list[dict]:
         """把游标里剩下的行读成 [{列名: 值}]，每个值都过一遍 _jsonable。
@@ -457,7 +412,6 @@ class Database:
         """
         cols = [d[0] for d in cur.description]
         return [{c: _jsonable(v) for c, v in zip(cols, row)} for row in cur.fetchall()]
-
     def _select_limited(self, cols: str, tail: str, limit: int) -> list[dict]:
         """`SELECT <cols> <tail> LIMIT <n>` 的共用收口（recent_trainings 等三处同构）。
 
@@ -473,7 +427,6 @@ class Database:
         with self.cursor() as cur:
             cur.execute(sql)
             return self._rows_to_dicts(cur)
-
     def latest_training(self, model_name: str | None = None, only_success: bool = True) -> dict | None:
         """取最近一次训练——它同时是推理任务的外键锚点（TrainingID）。
 
@@ -498,7 +451,6 @@ class Database:
             cur.execute(sql, tuple(params))
             rows = self._rows_to_dicts(cur)
         return rows[0] if rows else None
-
     def training_by_id(self, training_id: int) -> dict | None:
         """按主键取一次训练（显式传 training_id 做推理锚点时会用到）。
 
@@ -511,7 +463,6 @@ class Database:
             cur.execute(f"SELECT * FROM Trainings WHERE TrainingID = {self.placeholder}", (training_id,))
             rows = self._rows_to_dicts(cur)
         return rows[0] if rows else None
-
     def recent_trainings(self, limit: int = 20) -> list[dict]:
         """最近的训练记录（带模型名、数据集名，供列表页直接显示）。
 
@@ -524,7 +475,6 @@ class Database:
             "FROM Trainings t LEFT JOIN Models m ON m.ModelID = t.ModelID "
             "LEFT JOIN Datasets d ON d.DatasetID = t.DatasetID ORDER BY t.TrainingID DESC",
             limit)
-
     def recent_inference_tasks(self, limit: int = 20) -> list[dict]:
         """最近的推理任务（带模型名，供列表页直接显示）。
 
@@ -537,7 +487,6 @@ class Database:
             "FROM InferenceTasks k LEFT JOIN Models m ON m.ModelID = k.ModelID "
             "ORDER BY k.InferenceTaskID DESC",
             limit)
-
     def inference_task(self, task_id: int) -> dict | None:
         """取一个推理任务及其全部结果明细（明细挂在返回值的 results 里）。
 
@@ -558,7 +507,6 @@ class Database:
                         (task_id,))
             tasks[0]["results"] = self._rows_to_dicts(cur)
         return tasks[0]
-
     def models_in_db(self) -> list[dict]:
         """Models 表的全部登记行（供模型清单与「系统管理→数据库」页读）。
 
@@ -570,7 +518,6 @@ class Database:
             cur.execute("SELECT ModelID, ModelName, Description, ApiEndpoint, ModelType, Status, IsActive "
                         "FROM Models ORDER BY ModelID")
             return self._rows_to_dicts(cur)
-
     def datasets_in_db(self, limit: int = 200) -> list[dict]:
         """Datasets 表登记的数据集（供「数据集管理」页读）。
 
@@ -581,7 +528,6 @@ class Database:
             "DatasetID, DatasetName, Source, SampleCount, ClassCount, DataPath, Description, CreatedDate",
             "FROM Datasets ORDER BY DatasetID",
             limit)
-
     def register_dataset(self, **kwargs) -> dict:
         """登记数据集，并告知是新建还是已存在（供 POST /datasets/db）。
 
@@ -603,7 +549,6 @@ class Database:
             class_count=kwargs.get("class_count"), data_path=kwargs.get("data_path"),
             description=kwargs.get("description"))
         return {"DatasetID": dataset_id, "already_existed": existed, "DatasetName": name}
-
     # ------------------------------------------------------ 模型 CRUD
     # 可被 update_model 改的列白名单——SQL 里 set 的列名只能从这个元组来，
     # 外部传进来的键名一律不当列名用，否则就是一条"任意列名拼进 SQL"的注入面
@@ -612,7 +557,6 @@ class Database:
     # 库里这些列存的是旧目录下的绝对/相对路径，不一起换掉，列表页会显示成"产物丢失"
     _PATH_FIELDS = (("Trainings", ("ModelPath",)), ("InferenceTasks", ("InputPath", "OutputPath")),
                     ("ModelDeployments", ("DeployedPath", "DeployUrl")))
-
     def _count(self, cur, sql: str, params: tuple) -> int:
         """执行 COUNT(*) 取标量，把类型与空行两处兜底收在一处（引用统计要把 5 个 COUNT 逐个取出来）。
 
@@ -623,7 +567,6 @@ class Database:
         cur.execute(sql, params)
         row = cur.fetchone()
         return int(row[0]) if row else 0
-
     def model_references(self, name: str) -> dict:
         """某模型被哪些表引用了多少行——删之前必须先看这个，否则外键会直接拒绝。
 
@@ -646,7 +589,6 @@ class Database:
                     cur, f"SELECT COUNT(*) FROM {table} WHERE ModelID = {self.placeholder}", (mid,))
             total = sum(refs.values())
             return {"ModelID": mid, "references": refs, "total": total, "deletable": total == 0}
-
     def model_exists(self, name: str) -> bool:
         """Models 表里有没有这个名字（改名查重、上传登记都会用）。
 
@@ -657,7 +599,6 @@ class Database:
         self.ensure_schema()
         with self.cursor() as cur:
             return self._find_id(cur, "Models", "ModelID", "ModelName", name) is not None
-
     def rename_model_paths(self, old: str, new: str) -> dict:
         """模型改名后，把库里已存的**路径前缀**一起换掉（...\\models\\old\\... → ...\\models\\new\\...）。
 
@@ -684,7 +625,6 @@ class Database:
                 if hits:
                     touched[f"{table}.{cols[0]}"] = hits
         return touched
-
     def update_model(self, name: str, fields: dict, new_name: str | None = None) -> dict:
         """改 Models 表的登记信息（**不碰产物文件**）。
 
@@ -721,7 +661,6 @@ class Database:
             if cur.rowcount == 0:
                 raise DBError(f"模型 {name} 不存在于 Models 表")
         return {"updated": name, "new_name": new_name or name, "fields": touched}
-
     def delete_model(self, name: str, force: bool = False) -> dict:
         """删 Models 表登记行。有引用时默认拒绝，force=True 才连带删除引用行。
 
@@ -748,13 +687,11 @@ class Database:
                     cur.execute(f"DELETE FROM {table} WHERE ModelID = {self.placeholder}", (mid,))
             cur.execute(f"DELETE FROM Models WHERE ModelID = {self.placeholder}", (mid,))
         return {"deleted": name, "cascaded": bool(force and refs["total"]), "references": refs["references"]}
-
     # 说明：原先这里还有 dataset_references / update_dataset / delete_dataset 三个方法
     # （对应 GET/PUT/DELETE /datasets/db/<id>）。三者全项目零调用——前端只在
     # api/platform/index.ts 里声明过 updateDataset/deleteDataset 两个方法，没有任何页面调它们，
     # 路由本身也从来只是"登记的补录入口"，所以整组一并删除。
     # 数据集登记的**写入**仍走 POST /datasets/db，对应下面的 ensure_dataset()。
-
     def table_counts(self, max_age: float = 30.0) -> dict:
         """8 张表的行数。**带 30 秒缓存**——/health 与 /system 每次都要它，而 8 条 COUNT(*) 在
         MySQL 上不算便宜（之前每个请求都真跑一遍，是页面跳转慢的一个来源）。
@@ -777,6 +714,4 @@ class Database:
                 out[table] = int(cur.fetchone()[0])
         self._counts_cache = {"at": now, "data": out}
         return dict(out)
-
-
 database = Database()

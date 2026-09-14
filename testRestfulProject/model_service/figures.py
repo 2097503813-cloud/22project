@@ -49,12 +49,11 @@ FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 _CJK_FONTS = ["Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC", "Source Han Sans SC"]
 _plt = None
-_style_ready = False
 
 
 def _pyplot():
     """懒加载 matplotlib 并配好全局样式（只做一次）。返回 pyplot 模块。"""
-    global _plt, _style_ready
+    global _plt
     if _plt is None:
         import matplotlib
         # ⚠️ 必须在 `import matplotlib.pyplot` **之前**切换后端：pyplot 一旦被导入就把
@@ -76,14 +75,7 @@ def _pyplot():
         plt.rcParams["axes.grid"] = True
         plt.rcParams["grid.alpha"] = 0.3
         _plt = plt
-        _style_ready = bool(cjk)
     return _plt
-
-
-def has_cjk() -> bool:
-    """本机有没有可用的中文字体（/system 用它提示"图上中文可能显示不全"）。"""
-    _pyplot()
-    return _style_ready
 
 
 def _short_labels(labels: list[str]) -> list[str]:

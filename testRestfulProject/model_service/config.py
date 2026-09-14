@@ -35,9 +35,8 @@ MODEL_DIR = DATA_DIR / "models"             # 模型产物（对应图里的「P
 LOG_DIR = DATA_DIR / "logs"                 # 训练日志
 UPLOAD_DIR = DATA_DIR / "datasets"          # 上传/存放的表格数据集（一个子目录 = 一个数据集）
 SQL_DIR = PROJECT_DIR / "sql"
-# ⚠️ 遗留常量：sqlite 兜底已废弃（见 __init__ 里"只支持 MySQL"的校验），
-# 本常量现在没有任何地方引用，仅作历史痕迹保留。
-SQLITE_PATH = DATA_DIR / "model_management.db"
+# ⚠️ 原来的 SQLITE_PATH（sqlite 兜底库路径）已删除：它零引用，且 sqlite 兜底本身
+#    也早在 __init__ 里被"只支持 MySQL"的校验挡掉了。
 
 # 内置的 CWRU .mat 数据集：键是前端/接口里用的数据集名，值是磁盘目录
 DATASET_DIRS = {
@@ -154,30 +153,9 @@ class Config:
         self.db_name = _env("MODEL_DB_NAME", "model_management")
         self.db_port = int(_env("MODEL_DB_PORT", "3306") or "3306")
 
-        # 训练/推理默认超参，分别沿用各模型脚本原有的取值，保证与既有实验可比
-        # （1dcnn / cwt_cnn / adtk 三套，数值与 training.py 各分支里的内联默认值一致）。
-        # ⚠️ 已知冗余：这个字典**目前没有任何地方引用**（全项目只有本行赋值），
-        # 运行时真正的默认值写在 training.py 里，形式是 `opts.get("epochs", 10)` 这类内联字面量，
-        # 两边的数值**必须人工保持一致**。改默认超参时请改 training.py（那才是生效的那份），
-        # 这里的字典只当"参数默认值速查表"用。
-        self.defaults = {
-            "1dcnn": {
-                "dataset": "CWRU-0HP", "length": 784, "number": 600, "stride": 150,
-                "rate": [0.7, 0.15, 0.15], "normal": True, "epochs": 10, "batch_size": 128,
-            },
-            "cwt_cnn": {
-                "dataset": "CWRU-0HP", "length": 784, "number": 300, "stride": 150,
-                "rate": [0.5, 0.25, 0.25], "normal": True, "epochs": 50, "batch_size": 0,
-            },
-            "adtk": {
-                # 无监督：把「正常」信号切成窗口，窗口当样本，fit adtk 的 PcaAD
-                # （k=4 主成分；feature_mode=stats 用 10 维统计特征，raw 则直接用 784 点原始幅值）
-                "dataset": "CWRU-0HP", "length": 784, "number": 600, "stride": 784,
-                "detector": "PcaAD", "k": 4, "c": 5.0, "feature_mode": "stats",
-                "sampling_rate": 48000, "threshold_quantile": 0.995, "factor": 1.0,
-                "baseline_file": "normal_0_97.mat",
-            },
-        }
+        # ⚠️ 这里原来还有一个 self.defaults 字典（三套模型的默认超参速查表），已删除：
+        #    它全项目零引用（只有本行赋值），运行时真正生效的默认值写在 training.py 里，
+        #    形式是 `opts.get("epochs", 10)` 这类内联字面量。**改默认超参请改 training.py。**
 
     # ---- 便于 /health 与日志展示 ----
     def describe(self) -> dict:

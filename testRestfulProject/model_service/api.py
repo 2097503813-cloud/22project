@@ -41,8 +41,6 @@ from .inference import InvalidInput, predict
 from .registry import delete_version, list_artifacts, load_artifact
 from .training import MODEL_META, ALIASES, normalize_model, train
 
-# CONSOLE_HTML（指向同目录的 console.html）已删除：那个零构建单页控制台 GET /ui 的功能
-# 被 Vue 前端完全覆盖，属于重复实现，按用户要求连同文件一起清掉，避免留下死路径常量。
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")          # 训练日志里 Keras 进度条的转义序列
 _PACKAGES = ("numpy", "pandas", "scikit-learn", "scipy", "matplotlib", "h5py", "flask",

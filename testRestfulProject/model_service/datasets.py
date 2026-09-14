@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
 
 import numpy as np
@@ -49,11 +48,6 @@ CWRU_0HP_CLASSES: list[tuple[str, int, str]] = [
     ("48k_Drive_End_OR021@6_0_238.mat", 8, "外圈故障-0.021in@6点钟"),
     ("normal_0_97.mat",                9, "正常"),
 ]
-
-# 体检结果缓存：{目录: (时间戳, 结果)}。数据文件不会一秒一变，进页面时不必反复体检。
-# ⚠️ 键是调用方传来的目录字符串本身：同一目录写成相对路径与绝对路径会各存一份（不影响正确性，
-#    只是多体检一次）；也没有淘汰机制，条目数等于被访问过的目录数，量级很小，无需 LRU。
-_DESCRIBE_CACHE: dict[str, tuple[float, dict]] = {}
 
 # 未登记 .mat 的兜底命名规则：文件名前缀 → 故障部位（捕获组里是故障尺寸，单位 0.001in）。
 # 只影响"显示成什么名字"，不影响类别号——未登记文件的类别号在 load_windows 里递增分配。
@@ -302,24 +296,22 @@ def finalize_windows(train_x, train_y, test_x, test_y, labels, rate, normal, see
     }
 
 
-def describe_dataset(dataset_dir: Path | str, max_age: float = 120.0) -> dict:
+def describe_dataset(dataset_dir: Path | str) -> dict:
     """只做体检，不切数据：给 /models 与 /train 的预检用。
 
-    两个性能要点（之前这里是页面跳转慢的头号原因）：
-      1. 取每个 .mat 的采样点数**不要 loadmat**——那会把 24 万点的数组整个读进内存，
-         10 个文件就是几百 MB 的解析开销；改用 `whosmat`，只读变量名与形状；
-      2. 结果缓存 120 秒（数据文件不会一秒一变），避免每次进页面都重新体检。
+    性能要点（之前这里是页面跳转慢的头号原因）：取每个 .mat 的采样点数**不要 loadmat**——
+    那会把 24 万点的数组整个读进内存，10 个文件就是几百 MB 的解析开销；改用 `whosmat`，
+    只读变量名与形状。
+    ⚠️ 这里原先还有一层"120 秒结果缓存"（模块级 `_DESCRIBE_CACHE`，配一个 `max_age` 形参），
+    已整体删除：那个字典**只被读、从来没有被写**，缓存永远是空的，注释承诺的 120 秒缓存从未生效，
+    只是让读的人以为有缓存可清；而且它的键与淘汰策略还都是一笔糊涂账。改为直接体检后行为不变
+    ——`whosmat` 本身已经足够快（见上一段）。
     """
     # whosmat 是"轻量版 loadmat"：只解析 .mat 头信息（变量名 + 形状），不碰数组体。
     # ⚠️ 千万别在这里换成 loadmat：24 万点的数组 × 10 个文件 = 几百 MB 的解析与内存开销，
     #    那正是 /models、/train 预检页面卡顿的头号原因——体检只需要采样点数，不需要数据本身。
     from scipy.io import whosmat
     dataset_dir = Path(dataset_dir)
-    # 命中 max_age（默认 120 秒）内的缓存就直接返回，不重复体检（数据文件不会一秒一变）
-    key = str(dataset_dir)
-    cached = _DESCRIBE_CACHE.get(key)
-    if cached and time.time() - cached[0] < max_age:
-        return cached[1]
 
     rows = class_table(dataset_dir)
     present = [r for r in rows if r["on_disk"]]

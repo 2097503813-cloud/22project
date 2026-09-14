@@ -43,11 +43,6 @@ class Artifact:
     framework: str            # tensorflow-keras / pytorch / adtk —— 推理分派靠它
     meta: dict = field(default_factory=dict)   # meta.json 的完整内容（见模块头）
 
-    @property
-    def meta_path(self) -> Path:
-        """该产物的 meta.json 路径（可能还不存在，save_artifact 时才写）。"""
-        return self.directory / "meta.json"
-
     def to_dict(self) -> dict:
         """挑出给接口/前端用的字段（meta 里的原始 dict 太大，不透传）。
 
@@ -134,7 +129,7 @@ def _find_weights(directory: Path) -> Path | None:
     return None
 
 
-def save_artifact(name: str, framework: str, saver, meta: dict, keep_previous: bool = True) -> Artifact:
+def save_artifact(name: str, framework: str, saver, meta: dict) -> Artifact:
     """落盘一个模型产物，返回可用的 Artifact。
 
     saver: 调用方提供的回调，签名 `saver(target_dir: Path) -> Path`，负责把权重写进
@@ -142,6 +137,8 @@ def save_artifact(name: str, framework: str, saver, meta: dict, keep_previous: b
 
     整个落盘是一个"要么全有要么全无"的单元：中途任何异常都会把刚建的版本目录
     **整个删掉**（`rmtree`），避免留下"只有 scaler 没有权重"的半成品被后续查找误命中。
+    ⚠️ 原来的 `keep_previous=False` 分支（外加它专用的 `_prune_except()`）已删除：
+    全项目没有一处调用方传过这个参数，那个分支永远走不到，历史版本本来就是一律保留的。
     """
     target = next_version_dir(name)
     try:
@@ -159,21 +156,11 @@ def save_artifact(name: str, framework: str, saver, meta: dict, keep_previous: b
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        artifact = Artifact(name=name, version=target.name, directory=target,
-                            weights=Path(weights), framework=framework, meta=meta)
-        if not keep_previous:            # 只要最新版时，顺手清掉历史版本（默认保留，便于对比）
-            _prune_except(name, keep=target.name)
-        return artifact
+        return Artifact(name=name, version=target.name, directory=target,
+                        weights=Path(weights), framework=framework, meta=meta)
     except Exception:
         shutil.rmtree(target, ignore_errors=True)   # 回滚：不留半个产物
         raise
-
-
-def _prune_except(name: str, keep: str) -> None:
-    """只保留 keep 这一个版本，其余版本目录整个删掉（keep_previous=False 时用）。"""
-    for p in _model_root(name).iterdir():
-        if p.is_dir() and p.name != keep:
-            shutil.rmtree(p, ignore_errors=True)
 
 
 def load_artifact(name: str, version: str | None = None) -> Artifact:
@@ -230,11 +217,6 @@ def list_artifacts(name: str | None = None) -> list[Artifact]:
             out.append(Artifact(name=model_name, version=directory.name, directory=directory,
                                 weights=weights, framework=meta.get("framework", "unknown"), meta=meta))
     return out
-
-
-def latest_meta(name: str) -> dict:
-    """最新版本的 meta（拿不到产物时抛 FileNotFoundError，由调用方决定怎么报）。"""
-    return load_artifact(name).meta
 
 
 def delete_version(name: str, version: str) -> dict:

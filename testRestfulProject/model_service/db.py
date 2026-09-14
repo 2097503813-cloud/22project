@@ -43,8 +43,26 @@ class DBUnavailable(DBError):
 
 
 def _now() -> str:
-    """统一时间戳格式：MySQL 能解析的字符串。"""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    """统一时间戳格式：MySQL 能解析的字符串（截断到毫秒）。"""
+    return datetime.now().isoformat(sep=" ", timespec="milliseconds")
+
+
+def _dump_json(value):
+    """落 LONGTEXT 前的 JSON 文本；None 保持 SQL NULL（**不**写成字符串 "null"）。
+
+    ⚠️ `ModelInvocations.RequestParams` 是"无条件 dumps"的另一种口径（那列 NOT NULL），
+    需要"永远写文本"就别用这个函数。
+    default=str 兜住 datetime 之类的非标准类型：审计日志不值得为一个字段 500。
+    """
+    return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _bit(value):
+    """TINYINT(1) 列的值：None 保持 NULL，其余显式转 1/0。
+
+    不能直接塞 True/False：不同驱动对 bool 的处理不一致，落库取值会漂。
+    """
+    return None if value is None else (1 if value else 0)
 
 
 def _strip_sql_comments(text: str) -> str:
@@ -89,7 +107,7 @@ def _jsonable(value):
         return value.decode("utf-8", "replace")
     if isinstance(value, Decimal):
         return float(value)
-    if isinstance(value, (date,)):
+    if isinstance(value, date):
         return value.isoformat()
     return value
 
@@ -240,14 +258,33 @@ class Database:
                     "target": f"{self.cfg.db_host}:{self.cfg.db_port}/{self.cfg.db_name}"}
 
     # ------------------------------------------------------------------ 写入
-    def _insert_returning_id(self, cur, sql: str, params: tuple) -> int:
-        """执行 INSERT 并返回自增主键（MySQL 直接用 cursor.lastrowid）。"""
-        cur.execute(sql, params)
-        return int(cur.lastrowid)
-
     def _ph(self, n: int) -> str:
         """生成 n 个占位符并用逗号连起来，如 "%s, %s, %s"（VALUES 子句用）。"""
         return ", ".join([self.placeholder] * n)
+
+    def _insert_sql(self, table: str, cols: tuple[str, ...]) -> str:
+        """拼一条 INSERT：**列名只写一遍**，占位符个数由 len(cols) 推出。
+
+        以前是"手写列清单" + "手数占位符个数（_ph(14)）"两处各写一遍，加一列忘了改另一处，
+        就得到一个只在运行时才炸的 "Column count doesn't match value count"。
+        """
+        return f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({self._ph(len(cols))})"
+
+    def _insert_cur(self, cur, table: str, cols: tuple[str, ...], values: tuple) -> int:
+        """在该游标上 INSERT 一行并返回自增主键。只管执行、不管事务（事务归调用方的 cursor()）。"""
+        cur.execute(self._insert_sql(table, cols), values)
+        return int(cur.lastrowid)
+
+    def _find_id(self, cur, table: str, pk_col: str, name_col: str, name: str) -> int | None:
+        """按"名字列"查主键，查不到返回 None（不抛异常）。
+
+        ensure_dataset / ensure_model 的"有就取"、register_dataset 的探测、model_exists、
+        model_references 都在做这件事，以前各写一遍 SELECT。表名/列名是写死的字面量，值走占位符。
+        ⚠️ 相等比较由 MySQL 做，受该列 collation 影响（本库 utf8mb4_unicode_ci，**大小写不敏感**）。
+        """
+        cur.execute(f"SELECT {pk_col} FROM {table} WHERE {name_col} = {self.placeholder}", (name,))
+        row = cur.fetchone()
+        return int(row[0]) if row else None
 
     def ensure_dataset(self, name: str, source: str | None = None, sample_count: int | None = None,
                        class_count: int | None = None, data_path: str | None = None,
@@ -256,20 +293,19 @@ class Database:
 
         按 DatasetName 查（表上有唯一键）：命中直接返回既有主键，否则 INSERT 再回主键。
         做成幂等是因为每次训练/推理都要先把依赖行落实，调用方不必自己判断"该插还是该取"。
-        ⚠️ 命中分支**不更新**任何已有字段：同名再传 SampleCount/Description 也是白传，改要走 update_dataset()。
+        ⚠️ 命中分支**不更新**任何已有字段：同名再传 SampleCount/Description 也是白传
+        （曾经配套的 update_dataset() 已随零调用的 CRUD 路由一起删除，要改就直接写 SQL）。
         返回值是主键 ID，给 Trainings.DatasetID / InferenceTasks.TargetDatasetID 当外键用——
         外键顺序必须是 Datasets → Models → Trainings/InferenceTasks，反过来写数据库直接拒绝。
         """
         self.ensure_schema()
         with self.cursor(commit=True) as cur:
-            cur.execute(f"SELECT DatasetID FROM Datasets WHERE DatasetName = {self.placeholder}", (name,))
-            row = cur.fetchone()
-            if row:
-                return int(row[0])
-            return self._insert_returning_id(
-                cur,
-                "INSERT INTO Datasets (DatasetName, Source, SampleCount, ClassCount, DataPath, Description, CreatedDate) "
-                f"VALUES ({self._ph(7)})",
+            found = self._find_id(cur, "Datasets", "DatasetID", "DatasetName", name)
+            if found is not None:
+                return found
+            return self._insert_cur(
+                cur, "Datasets",
+                ("DatasetName", "Source", "SampleCount", "ClassCount", "DataPath", "Description", "CreatedDate"),
                 (name, _clip(source, 200), sample_count, class_count, _clip(data_path, 500),
                  _clip(description, 500), _now()),
             )
@@ -285,14 +321,12 @@ class Database:
         """
         self.ensure_schema()
         with self.cursor(commit=True) as cur:
-            cur.execute(f"SELECT ModelID FROM Models WHERE ModelName = {self.placeholder}", (name,))
-            row = cur.fetchone()
-            if row:
-                return int(row[0])
-            return self._insert_returning_id(
-                cur,
-                "INSERT INTO Models (ModelName, Description, ApiEndpoint, ModelType, CreatedDate, IsActive, Status) "
-                f"VALUES ({self._ph(7)})",
+            found = self._find_id(cur, "Models", "ModelID", "ModelName", name)
+            if found is not None:
+                return found
+            return self._insert_cur(
+                cur, "Models",
+                ("ModelName", "Description", "ApiEndpoint", "ModelType", "CreatedDate", "IsActive", "Status"),
                 (name, _clip(description, 500), _clip(api_endpoint, 255), _clip(model_type, 50), _now(), 1,
                  _clip(status, 20)),
             )
@@ -311,11 +345,10 @@ class Database:
         """
         self.ensure_schema()
         with self.cursor(commit=True) as cur:
-            return self._insert_returning_id(
-                cur,
-                "INSERT INTO Trainings (ModelID, DatasetID, TrainName, Epochs, BatchSize, Accuracy, Loss, "
-                "ModelPath, Status, CreatedDate, StartedDate, CompletedDate, CreatedBy, Remark) "
-                f"VALUES ({self._ph(14)})",
+            return self._insert_cur(
+                cur, "Trainings",
+                ("ModelID", "DatasetID", "TrainName", "Epochs", "BatchSize", "Accuracy", "Loss",
+                 "ModelPath", "Status", "CreatedDate", "StartedDate", "CompletedDate", "CreatedBy", "Remark"),
                 (model_id, dataset_id, _clip(train_name, 200), epochs, batch_size, accuracy, loss,
                  _clip(model_path, 500), _clip(status, 20), _now(), started, completed,
                  _clip(created_by, 100), _clip(remark, 500)),
@@ -328,22 +361,20 @@ class Database:
                           status: str | None = None) -> int:
         """④ ModelInvocations：每次 /predict 调用留一条（失败也留），相当于调用审计日志。
 
-        request_params / response_result 是任意结构的 Python 对象，落 LONGTEXT 前先 json.dumps，
-        用 default=str 兜住 datetime 之类的非标准类型——审计日志不值得为一个字段 500。
-        ⚠️ 布尔列是 TINYINT(1)：is_success 必须显式转 1/0，None 要保留成 NULL，
-        不能直接塞 True/False，否则不同驱动下的取值不一致。
+        ⚠️ request_params / response_result 是任意结构的 Python 对象，落 LONGTEXT 前先 json.dumps；
+        RequestParams 那列用 `_dump_json` 的反面（无条件 dumps）：它的列是 NOT NULL，
+        所以 None 在这里写的是字符串 "null" 而不是 SQL NULL，别"顺手统一"。
         """
         self.ensure_schema()
         with self.cursor(commit=True) as cur:
-            return self._insert_returning_id(
-                cur,
-                "INSERT INTO ModelInvocations (ModelID, TrainingID, ApiEndpoint, RequestParams, ResponseResult, "
-                "DurationMs, IsSuccess, StatusCode, ErrorMessage, ClientIP, Status, InvocationDate) "
-                f"VALUES ({self._ph(12)})",
+            return self._insert_cur(
+                cur, "ModelInvocations",
+                ("ModelID", "TrainingID", "ApiEndpoint", "RequestParams", "ResponseResult",
+                 "DurationMs", "IsSuccess", "StatusCode", "ErrorMessage", "ClientIP", "Status", "InvocationDate"),
                 (model_id, training_id, _clip(api_endpoint, 255),
                  json.dumps(request_params, ensure_ascii=False, default=str),
-                 json.dumps(response_result, ensure_ascii=False, default=str) if response_result is not None else None,
-                 duration_ms, None if is_success is None else (1 if is_success else 0), status_code,
+                 _dump_json(response_result),
+                 duration_ms, _bit(is_success), status_code,
                  error_message, _clip(client_ip, 50), _clip(status, 20), _now()),
             )
 
@@ -359,15 +390,14 @@ class Database:
         也支持 insert_task_with_results 把它和 ⑥ 塞进同一个事务。
         DeploymentID / DeviceID 显式写 None：本服务以 TrainingID 为权威锚点，这两个字段留给边缘设备支线回填。
         """
-        return self._insert_returning_id(
-            cur,
-            "INSERT INTO InferenceTasks (TrainingID, TargetDatasetID, TaskName, TaskType, Status, "
-            "InferenceParams, ResultSummary, ErrorMessage, DeploymentID, ModelID, DeviceID, InputPath, "
-            "OutputPath, Progress, CreatedDate, StartedDate, CompletedDate, CreatedBy) "
-            f"VALUES ({self._ph(18)})",
+        return self._insert_cur(
+            cur, "InferenceTasks",
+            ("TrainingID", "TargetDatasetID", "TaskName", "TaskType", "Status",
+             "InferenceParams", "ResultSummary", "ErrorMessage", "DeploymentID", "ModelID", "DeviceID",
+             "InputPath", "OutputPath", "Progress", "CreatedDate", "StartedDate", "CompletedDate", "CreatedBy"),
             (training_id, target_dataset_id, _clip(task_name, 200), _clip(task_type, 20), _clip(status, 20),
-             json.dumps(inference_params, ensure_ascii=False, default=str) if inference_params is not None else None,
-             json.dumps(result_summary, ensure_ascii=False, default=str) if result_summary is not None else None,
+             _dump_json(inference_params),
+             _dump_json(result_summary),
              error_message, None, model_id, None, _clip(input_path, 500), _clip(output_path, 500), progress,
              _now(), started, completed, _clip(created_by, 100)),
         )
@@ -386,18 +416,18 @@ class Database:
         cols = ("InferenceTaskID", "RowIdentifier", "ResultTimestamp", "PredictedValue", "AnomalyScore",
                 "IsAnomaly", "PredictedCategory", "Confidence", "FeatureSnapshot", "ModelID", "SampleIndex",
                 "PredictedClass", "PredictedLabel", "Score", "ActualClass", "ResultDetail", "CreatedDate")
-        sql = (f"INSERT INTO InferenceResults ({', '.join(cols)}) VALUES ({self._ph(len(cols))})")
+        sql = self._insert_sql("InferenceResults", cols)   # 与上面几处共用：列名只写一遍
         now = _now()
         for row in rows:
             cur.execute(sql, (
                 task_id, _clip(row.get("row_identifier"), 100), row.get("result_timestamp") or now,
                 row.get("predicted_value"), row.get("anomaly_score"),
-                None if row.get("is_anomaly") is None else (1 if row["is_anomaly"] else 0),
+                _bit(row.get("is_anomaly")),
                 _clip(row.get("predicted_category"), 50), row.get("confidence"),
                 _clip(row.get("feature_snapshot"), 500), row.get("model_id"), row.get("sample_index"),
                 row.get("predicted_class"), _clip(row.get("predicted_label"), 100), row.get("score"),
                 row.get("actual_class"),
-                json.dumps(row.get("detail"), ensure_ascii=False, default=str) if row.get("detail") is not None else None,
+                _dump_json(row.get("detail")),
                 now,
             ))
         return len(rows)
@@ -427,6 +457,22 @@ class Database:
         """
         cols = [d[0] for d in cur.description]
         return [{c: _jsonable(v) for c, v in zip(cols, row)} for row in cur.fetchall()]
+
+    def _select_limited(self, cols: str, tail: str, limit: int) -> list[dict]:
+        """`SELECT <cols> <tail> LIMIT <n>` 的共用收口（recent_trainings 等三处同构）。
+
+        这三处的差别只有"选哪些列 / JOIN 谁 / 按什么排序"，前后几行一字不差地重复了三遍。
+        ⚠️ LIMIT 是 f-string 拼**数字**不是占位符（LIMIT 后只能跟字面量），安全性靠这里
+        int() 再强转一道；cols / tail 是各方法写死的字面量，没有外部输入。
+        """
+        self.ensure_schema()
+        # ⚠️ SQL 必须在进 cursor 之前算好：`int(limit)` 转不动时要像以前一样"还没连库就抛"。
+        #    写进 with 里面的话，库连不上时抛的会是 DBUnavailable（上层映射 503），
+        #    而不是原来的 ValueError/TypeError —— 异常类型被换掉了。
+        sql = f"SELECT {cols} {tail} LIMIT {int(limit)}"
+        with self.cursor() as cur:
+            cur.execute(sql)
+            return self._rows_to_dicts(cur)
 
     def latest_training(self, model_name: str | None = None, only_success: bool = True) -> dict | None:
         """取最近一次训练——它同时是推理任务的外键锚点（TrainingID）。
@@ -469,39 +515,28 @@ class Database:
     def recent_trainings(self, limit: int = 20) -> list[dict]:
         """最近的训练记录（带模型名、数据集名，供列表页直接显示）。
 
-        LEFT JOIN 是必要的：DatasetID 可空（数据集被删时置空），INNER JOIN 会让这些训练整条消失。
-        LIMIT 用 f-string 拼数字而非占位符：参数化值只能出现在"值"的位置，LIMIT 后跟的是字面量，
-        好在 limit 已被 int() 强制成整数，拼进去没有注入面。
+        ⚠️ 两个 JOIN 都必须是 LEFT：DatasetID 可空（数据集被删时置空），
+        INNER JOIN 会让这些训练整条从列表里消失。
         """
-        self.ensure_schema()
-        cols = ("t.TrainingID, t.TrainName, t.Epochs, t.BatchSize, t.Accuracy, t.Loss, t.Status, t.ModelPath, "
-                "t.StartedDate, t.CompletedDate, t.CreatedDate, m.ModelName, d.DatasetName")
-        # 分页语法两种方言不同：SQL Server 用 TOP，其余用 LIMIT
-        tail = "FROM Trainings t LEFT JOIN Models m ON m.ModelID = t.ModelID " \
-               "LEFT JOIN Datasets d ON d.DatasetID = t.DatasetID ORDER BY t.TrainingID DESC"
-        # 只用 MySQL：直接 LIMIT（原来的 SQL Server `TOP` 分支已移除）
-        sql = f"SELECT {cols} {tail} LIMIT {int(limit)}"
-        with self.cursor() as cur:
-            cur.execute(sql)
-            return self._rows_to_dicts(cur)
+        return self._select_limited(
+            "t.TrainingID, t.TrainName, t.Epochs, t.BatchSize, t.Accuracy, t.Loss, t.Status, t.ModelPath, "
+            "t.StartedDate, t.CompletedDate, t.CreatedDate, m.ModelName, d.DatasetName",
+            "FROM Trainings t LEFT JOIN Models m ON m.ModelID = t.ModelID "
+            "LEFT JOIN Datasets d ON d.DatasetID = t.DatasetID ORDER BY t.TrainingID DESC",
+            limit)
 
     def recent_inference_tasks(self, limit: int = 20) -> list[dict]:
         """最近的推理任务（带模型名，供列表页直接显示）。
 
-        与 recent_trainings 同一套路：LEFT JOIN ModelName（上传/占位模型可能不在 Models 里，
-        INNER JOIN 会让这些任务从列表里凭空消失），LIMIT 同样经 int() 后再拼进 SQL。
+        ⚠️ 同 recent_trainings：LEFT JOIN ModelName 是必要的——上传/占位模型可能不在 Models 里，
+        INNER JOIN 会让这些任务凭空消失。
         """
-        self.ensure_schema()
-        cols = ("k.InferenceTaskID, k.TaskName, k.TaskType, k.Status, k.Progress, k.TrainingID, "
-                "k.TargetDatasetID, k.ResultSummary, k.CreatedDate, k.CompletedDate, m.ModelName")
-        # 同上：LEFT JOIN 是必要的——上传/占位模型可能在 Models 里查不到
-        tail = ("FROM InferenceTasks k LEFT JOIN Models m ON m.ModelID = k.ModelID "
-                "ORDER BY k.InferenceTaskID DESC")
-        # 只用 MySQL：直接 LIMIT（原来的 SQL Server `TOP` 分支已移除）
-        sql = f"SELECT {cols} {tail} LIMIT {int(limit)}"
-        with self.cursor() as cur:
-            cur.execute(sql)
-            return self._rows_to_dicts(cur)
+        return self._select_limited(
+            "k.InferenceTaskID, k.TaskName, k.TaskType, k.Status, k.Progress, k.TrainingID, "
+            "k.TargetDatasetID, k.ResultSummary, k.CreatedDate, k.CompletedDate, m.ModelName",
+            "FROM InferenceTasks k LEFT JOIN Models m ON m.ModelID = k.ModelID "
+            "ORDER BY k.InferenceTaskID DESC",
+            limit)
 
     def inference_task(self, task_id: int) -> dict | None:
         """取一个推理任务及其全部结果明细（明细挂在返回值的 results 里）。
@@ -541,16 +576,11 @@ class Database:
 
         ⚠️ 默认 limit=200 是硬上限：第 200 条之后的数据集在这个接口上"查不到"，
         页面看起来像数据丢了（实际在库里）。要翻页得由调用方显式传更大的 limit。
-        LIMIT 数字同样经 int() 再拼进 SQL，不占位（LIMIT 后只能跟字面量）。
         """
-        self.ensure_schema()
-        cols = ("DatasetID, DatasetName, Source, SampleCount, ClassCount, DataPath, Description, CreatedDate")
-        tail = "FROM Datasets ORDER BY DatasetID"
-        # 只用 MySQL：直接 LIMIT（原来的 SQL Server `TOP` 分支已移除）
-        sql = f"SELECT {cols} {tail} LIMIT {int(limit)}"
-        with self.cursor() as cur:
-            cur.execute(sql)
-            return self._rows_to_dicts(cur)
+        return self._select_limited(
+            "DatasetID, DatasetName, Source, SampleCount, ClassCount, DataPath, Description, CreatedDate",
+            "FROM Datasets ORDER BY DatasetID",
+            limit)
 
     def register_dataset(self, **kwargs) -> dict:
         """登记数据集，并告知是新建还是已存在（供 POST /datasets/db）。
@@ -565,10 +595,9 @@ class Database:
         self.ensure_schema()
         try:
             with self.cursor() as cur:
-                cur.execute(f"SELECT DatasetID FROM Datasets WHERE DatasetName = {self.placeholder}", (name,))
-                existed = cur.fetchone() is not None
+                existed = self._find_id(cur, "Datasets", "DatasetID", "DatasetName", name) is not None
         except Exception:
-            existed = False
+            existed = False        # 探测失败只丢一个提示，绝不能让"登记"这个主操作跟着失败
         dataset_id = self.ensure_dataset(
             name=name, source=kwargs.get("source"), sample_count=kwargs.get("sample_count"),
             class_count=kwargs.get("class_count"), data_path=kwargs.get("data_path"),
@@ -585,7 +614,7 @@ class Database:
                     ("ModelDeployments", ("DeployedPath", "DeployUrl")))
 
     def _count(self, cur, sql: str, params: tuple) -> int:
-        """执行 COUNT(*) 取标量（引用统计到处要用，单拎出来）。
+        """执行 COUNT(*) 取标量，把类型与空行两处兜底收在一处（引用统计要把 5 个 COUNT 逐个取出来）。
 
         统一 int(...) 转换：COUNT(*) 的返回类型随驱动而异（pymysql 给 int，别家可能给 Decimal），
         转一次就能免掉后面比较/相加时的类型意外。
@@ -598,7 +627,7 @@ class Database:
     def model_references(self, name: str) -> dict:
         """某模型被哪些表引用了多少行——删之前必须先看这个，否则外键会直接拒绝。
 
-        逐表 COUNT 而不是一条 UNION：五张表的引用列名不同，分表统计出来的 dict 正好给前端逐项展示。
+        逐表 COUNT 而不是一条 UNION：前端要按表逐项展示，一条 UNION 只能给出总数。
         ⚠️ 计数口径与 delete_model 的级联口径**不完全一致**：这里按 InferenceResults.ModelID 数，
         而 force 删除走的是"结果 ← 任务"的子查询。如果某条结果行的 ModelID 与它所属任务的 ModelID 不同，
         它既不会被级联删掉、又会在外键上挡住 Models 行的删除（表现为"计数说是 0、删却删不掉"）。
@@ -606,18 +635,17 @@ class Database:
         """
         self.ensure_schema()
         with self.cursor() as cur:
-            cur.execute(f"SELECT ModelID FROM Models WHERE ModelName = {self.placeholder}", (name,))
-            row = cur.fetchone()
-            if not row:
+            mid = self._find_id(cur, "Models", "ModelID", "ModelName", name)
+            if mid is None:
                 raise DBError(f"模型 {name} 不存在于 Models 表")
-            mid = int(row[0])
             refs = {}
-            for table, col in (("Trainings", "ModelID"), ("ModelInvocations", "ModelID"),
-                               ("ModelDeployments", "ModelID"), ("InferenceTasks", "ModelID"),
-                               ("InferenceResults", "ModelID")):
-                refs[table] = self._count(cur, f"SELECT COUNT(*) FROM {table} WHERE {col} = {self.placeholder}", (mid,))
-            return {"ModelID": mid, "references": refs,
-                    "total": sum(refs.values()), "deletable": sum(refs.values()) == 0}
+            # 五张表的引用列都叫 ModelID，所以列名不随表变化，只有表名是变量
+            for table in ("Trainings", "ModelInvocations", "ModelDeployments",
+                          "InferenceTasks", "InferenceResults"):
+                refs[table] = self._count(
+                    cur, f"SELECT COUNT(*) FROM {table} WHERE ModelID = {self.placeholder}", (mid,))
+            total = sum(refs.values())
+            return {"ModelID": mid, "references": refs, "total": total, "deletable": total == 0}
 
     def model_exists(self, name: str) -> bool:
         """Models 表里有没有这个名字（改名查重、上传登记都会用）。
@@ -628,8 +656,7 @@ class Database:
         """
         self.ensure_schema()
         with self.cursor() as cur:
-            cur.execute(f"SELECT ModelID FROM Models WHERE ModelName = {self.placeholder}", (name,))
-            return cur.fetchone() is not None
+            return self._find_id(cur, "Models", "ModelID", "ModelName", name) is not None
 
     def rename_model_paths(self, old: str, new: str) -> dict:
         """模型改名后，把库里已存的**路径前缀**一起换掉（...\\models\\old\\... → ...\\models\\new\\...）。
@@ -671,14 +698,18 @@ class Database:
         `sets` 为空时主动抛 DBError：静默成功会让调用方以为改生效了（rowcount==0 同理，判"不存在"）。
         """
         self.ensure_schema()
-        sets, params = [], []
+        # touched 是与 sets 平行的"改了哪些列"清单：以前是靠 `s.split(" =")[0]` 从拼好的 SQL 串里
+        # 反推列名，一旦 SET 片段的写法稍变（比如改成 `col=?,`）就会悄悄取错；直接记下来更直白。
+        sets, params, touched = [], [], []
         for col in self._MODEL_FIELDS:
             if col in fields and fields[col] is not None:
+                touched.append(col)
                 sets.append(f"{col} = {self.placeholder}")
                 params.append(_clip(fields[col], 500))
         if new_name and new_name != name:
             if self.model_exists(new_name):
                 raise DBError(f"模型名 {new_name} 已被占用，换一个")
+            touched.append("ModelName")
             sets.append(f"ModelName = {self.placeholder}")
             params.append(_clip(new_name, 100))
         if not sets:
@@ -689,7 +720,7 @@ class Database:
             cur.execute(f"UPDATE Models SET {', '.join(sets)} WHERE ModelName = {self.placeholder}", tuple(params))
             if cur.rowcount == 0:
                 raise DBError(f"模型 {name} 不存在于 Models 表")
-        return {"updated": name, "new_name": new_name or name, "fields": [s.split(" =")[0] for s in sets]}
+        return {"updated": name, "new_name": new_name or name, "fields": touched}
 
     def delete_model(self, name: str, force: bool = False) -> dict:
         """删 Models 表登记行。有引用时默认拒绝，force=True 才连带删除引用行。
@@ -708,15 +739,13 @@ class Database:
         mid = refs["ModelID"]
         with self.cursor(commit=True) as cur:
             if force:
-                for table in ("InferenceResults", "InferenceTasks", "ModelInvocations",
-                              "ModelDeployments", "Trainings"):
-                    # InferenceResults 需要经由 InferenceTasks 间接关联
-                    if table == "InferenceResults":
-                        cur.execute(
-                            "DELETE FROM InferenceResults WHERE InferenceTaskID IN "
-                            f"(SELECT InferenceTaskID FROM InferenceTasks WHERE ModelID = {self.placeholder})", (mid,))
-                    else:
-                        cur.execute(f"DELETE FROM {table} WHERE ModelID = {self.placeholder}", (mid,))
+                # InferenceResults 没有直接的 ModelID 外键约束语义，只能经由 InferenceTasks 的子查询间接删；
+                # 所以它单独写一条（子查询与 DELETE 同句是有意的，见上面的 ⚠️），其余四张表单走同一个循环
+                cur.execute(
+                    "DELETE FROM InferenceResults WHERE InferenceTaskID IN "
+                    f"(SELECT InferenceTaskID FROM InferenceTasks WHERE ModelID = {self.placeholder})", (mid,))
+                for table in ("InferenceTasks", "ModelInvocations", "ModelDeployments", "Trainings"):
+                    cur.execute(f"DELETE FROM {table} WHERE ModelID = {self.placeholder}", (mid,))
             cur.execute(f"DELETE FROM Models WHERE ModelID = {self.placeholder}", (mid,))
         return {"deleted": name, "cascaded": bool(force and refs["total"]), "references": refs["references"]}
 

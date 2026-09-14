@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import platform
 import re
+import shutil
 import sys
 import traceback
 from datetime import datetime
@@ -41,7 +42,7 @@ from .config import config
 from .db import DBError, database
 from .figures import FIG_DIR, clear_figures, list_figures
 from .inference import InvalidInput, predict
-from .registry import delete_version, list_artifacts, load_artifact
+from .registry import _VERSION_RE, delete_version, list_artifacts, load_artifact, next_version_dir
 from .training import MODEL_META, ALIASES, normalize_model, train
 
 
@@ -251,6 +252,15 @@ def _int(value, default=None, name="参数"):
         raise InvalidInput(f"{name} 必须是整数，收到 {value!r}")
 
 
+def _sanitize_name(value: str, default: str) -> str:
+    """名字 → **磁盘安全形式**：非法字符换成下划线，再去掉首尾的点与下划线，为空则用 default。
+
+    允许中英文、数字、下划线、点、横线。⚠️ 本函数**从不抛异常**，所以"必须继续跑"的路径
+    （回滚、上传落盘）用它；要求"非法就报错、不许静默改名"的路径（改模型名）用 `_safe_model_name()`。
+    """
+    return re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", value).strip("._") or default
+
+
 def _resolve_workspace_path(raw: str) -> Path:
     """把用户给的路径解析成**工作区内**的文件（`/datasets/table`、`/datasets/signal` 用它）。
 
@@ -434,12 +444,12 @@ class DatasetUpload(Resource):
     def post(self):
         """保存上传的表格文件，一个文件 = 一个类别（文件名即标签）。"""
         name = (request.form.get("name") or "").strip()
-        files = request.files.getlist("file") or request.files.getlist("files")
+        files = _uploaded_files()
         if not files:
             return {"error": "没有收到文件（表单字段名用 file，可重复传多个）"}, 400
         if not name:
             name = Path(files[0].filename or "dataset").stem
-        safe_name = re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", name).strip("._") or "dataset"
+        safe_name = _sanitize_name(name, "dataset")
         target = config.upload_dir / safe_name
         target.mkdir(parents=True, exist_ok=True)
         saved, skipped, overwritten = [], [], []
@@ -490,20 +500,17 @@ class TablePreview(Resource):
         # 并用 relative_to(workspace) 判定越界——字符串 startswith 会被 D:\22project_evil 这类同前缀目录绕过
         try:
             path = _resolve_workspace_path(raw)
-        except InvalidInput as exc:
-            return {"error": str(exc)}, 400
-        # 扩展名白名单先行：不是 csv/xlsx/xls 就 400 说清楚，别等 pandas 抛一层看不懂的错再回 500
-        if not tabular.is_table(path):
-            return {"error": f"不是可预览的表格文件（支持 {sorted(tabular.TABLE_SUFFIXES)}）：{raw}"}, 400
-        try:
+            # 扩展名白名单先行：不是 csv/xlsx/xls 就 400 说清楚，别等 pandas 抛一层看不懂的错再回 500
+            # （is_table 只看后缀、不打开文件，放在 try 里纯粹是为了和下面共用同一个 except）
+            if not tabular.is_table(path):
+                return {"error": f"不是可预览的表格文件（支持 {sorted(tabular.TABLE_SUFFIXES)}）：{raw}"}, 400
             # rows = 预览多少行（前端表格默认显示 20 行）。⚠️ `or 20` 在 rows=0 时才生效——
             # 0 行预览没有意义，退成默认 20 可以接受；但 0 有语义的参数（如 /predict 的 limit）不能照抄这写法。
-            # ⚠️ `_int()` 在这个 try 里求值：rows=abc 时它抛的 InvalidInput（ValueError 子类）会先被
-            #    下面的 `except InvalidInput` 接住 → 400；所以该分支必须排在 `except Exception` **之前**，
-            #    否则会被兜底分支吞掉变成 500，与其它接口"参数错→400"的口径不一致。
             data = tabular.preview(path, rows=_int(request.args.get("rows"), 20, "rows") or 20,
                                    sheet=request.args.get("sheet"), column=request.args.get("column"))
         except InvalidInput as exc:
+            # ⚠️ 这一档必须排在 `except Exception` **之前**：InvalidInput 是 ValueError 子类，
+            # 掉进兜底分支就变成 500，与其它接口"参数错→400"的口径不一致（?rows=abc 曾会这样）
             return {"error": str(exc)}, 400
         except Exception as exc:
             # 文件损坏/加密/列名对不上/不是数值列……统一算"这份表格读不出来"：500 但带上异常类型，便于定位
@@ -562,12 +569,12 @@ class Train(Resource):
                 options["dataset_dir"] = str(resolved)
             if epochs is not None:
                 options["epochs"] = epochs
-        except InvalidInput as exc:
-            return {"error": str(exc)}, 400
         except FileNotFoundError as exc:            # 数据目录不存在 / 目录里没有可用数据文件
             return {"error": str(exc),
                     "hint": "检查 dataset_dir 与 dataset_type；CWRU 默认目录是 1DCNN/0HP"}, 409
         except ValueError as exc:                   # 未知模型名、rate 不合法、表里没有数值列、基线文件缺失…
+            # （含 InvalidInput —— 它是 ValueError 子类，两者都是"参数错 → 400 + 同一句话"，
+            #   所以上面不需要再单独写一档 except InvalidInput）
             return {"error": str(exc)}, 400
 
         result = train(name, options)
@@ -582,25 +589,41 @@ class TrainingList(Resource):
     """GET /trainings?limit=N —— 最近训练记录（读库）。"""
 
     def get(self):
-        # limit 是"最近 N 条"：_int() 负责把 None 变默认 20（转不动则抛 InvalidInput），
-        # min(..., 200) 再夹上限，防止一次把整张表拉回来
-        # ⚠️ 这里用的是 `_int(...) or 20` 这个 falsy 写法：limit=0 是 falsy，会被悄悄换成 20（不是 0 条）。
-        #    对"最近 N 条"列表接口来说 0 条本来没意义，退成默认值与用户意图一致，所以这里可以接受；
-        #    但同样的写法搬到 /predict 的 limit 上就是 bug（0 有语义），那边刻意拆成两步
-        #    （`limit = _int(...)` 再 `if limit is None: limit = 1`）。两处写法不一致是**故意的**，别"统一风格"
-        # ⚠️ 这里额外包了 try：`_int()` 转不动时会抛 InvalidInput（ValueError 子类），而项目里没有
-        #    全局异常处理器，不接住就会变成 500。?limit=abc 属于参数错，应当明确回 400。
-        try:
-            limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
-        except InvalidInput as exc:
-            return {"error": str(exc)}, 400
-        # ⚠️ limit 最终由 db.py 用 f-string 拼进 `LIMIT {int(limit)}`：安全全靠 API 层保证它是"整数且 ≤200"，
-        #    db 那边的 int() 只是最后一道兜底（拼接 SQL 的写法本身不该再扩散）
-        try:
-            return {"trainings": database.recent_trainings(limit), "dialect": database.dialect}
-        except DBError as exc:
-            # 读库失败 → 503 且带上 dialect：前端提示"数据库不可用"，而不是显示成"没有训练记录"
-            return {"error": str(exc), "dialect": database.dialect}, 503
+        return _recent_list("trainings", database.recent_trainings)
+
+
+def _recent_list(key: str, fetch):
+    """`GET /xxx?limit=N`（默认 20、上限 200）的"最近 N 条"读库接口，/trainings 与 /inference-tasks 共用。
+
+    两个接口的方法体本来 12 行逐字重复，只差"取哪个 dict 键 / 调哪个 db 方法"。
+
+    limit 语义：`_int()` 负责把缺参变默认 20（转不动则抛 InvalidInput），min(..., 200) 再夹上限，
+    防止一次把整张表拉回来。
+    ⚠️ 这里用的是 `_int(...) or 20` 这个 falsy 写法：limit=0 是 falsy，会被悄悄换成 20（不是 0 条）。
+       对"最近 N 条"列表接口来说 0 条本来没意义，退成默认值与用户意图一致，所以这里可以接受；
+       但同样的写法搬到 /predict 的 limit 上就是 bug（0 有语义），那边刻意不做 falsy 回退
+       （见 Predict.post：`_int()` 取值 + 独立的范围校验）。两处写法不一致是**故意的**，别"统一风格"。
+    ⚠️ 这里额外包了 try：`_int()` 转不动时会抛 InvalidInput（ValueError 子类），而 flask_restful 会把它
+       变成 500（Flask 的 errorhandler 够不着，见 register_api 末尾）。?limit=abc 属于参数错，应当明确回 400。
+    ⚠️ limit 最终由 db.py 用 f-string 拼进 `LIMIT {int(limit)}`：安全全靠 API 层保证它是"整数且 ≤200"，
+       db 那边的 int() 只是最后一道兜底（拼接 SQL 的写法本身不该再扩散）。
+    """
+    try:
+        limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
+    except InvalidInput as exc:
+        return {"error": str(exc)}, 400
+    try:
+        return {key: fetch(limit), "dialect": database.dialect}, 200
+    except DBError as exc:
+        # 读库失败 → 503 且带上 dialect：前端提示"数据库不可用"，而不是显示成"没有记录"
+        return {"error": str(exc), "dialect": database.dialect}, 503
+
+
+class TrainingList(Resource):
+    """GET /trainings?limit=N —— 最近训练记录（读库）。"""
+
+    def get(self):
+        return _recent_list("trainings", database.recent_trainings)
 
 
 def _log_failed_inference(name: str, exc: Exception, client_ip: str | None, body: dict) -> None:
@@ -656,18 +679,17 @@ class Predict(Resource):
             name = (body.get("model") or "").strip()
             if not name:
                 raise InvalidInput("model 必填")
-            # 注意：不能写 `_int(...) or 默认值` —— 0 是 falsy，会把 limit=0 悄悄改成 1 放过去
+            # 写法要点：默认值交给 _int 的第二个参数（缺参就原样返回它），
+            # **不能**写成 `_int(...) or 1` —— 0 是 falsy，会把用户明确传的 limit=0
+            # 悄悄换成 1 放过去，于是绕过下面这条范围校验。
             limit = _int(body.get("limit"), 1, "limit")
-            limit = 1 if limit is None else limit
             if not (1 <= limit <= MAX_LIMIT):
                 raise InvalidInput(f"limit 必须在 1..{MAX_LIMIT} 之间")
             # index 必须 ≥0：负索引在 Python 切片里是"从尾部数"，会切出错位窗口却照样通过校验
             index = _int(body.get("index"), 0, "index")
-            index = 0 if index is None else index
             if index < 0:
                 raise InvalidInput("index 不能为负数（窗口序号从 0 开始）")
             top_k = _int(body.get("top_k"), 3, "top_k")
-            top_k = 3 if top_k is None else top_k
             if not (1 <= top_k <= 50):
                 raise InvalidInput("top_k 必须在 1..50 之间")
             try:
@@ -688,11 +710,9 @@ class Predict(Resource):
             except Exception as exc:                 # 失败也要留一条调用记录，再原样抛出
                 _log_failed_inference(name, exc, request.remote_addr, body)
                 raise
-        except InvalidInput as exc:
-            return {"error": str(exc)}, 400
         except FileNotFoundError as exc:
             return {"error": str(exc), "hint": "先调 POST /train 生成模型产物"}, 409
-        except (DBError, ValueError) as exc:
+        except (DBError, ValueError) as exc:        # ValueError 已含 InvalidInput，不必单列一档
             return {"error": str(exc)}, 400
         except Exception as exc:                                   # pragma: no cover
             return {"error": f"{type(exc).__name__}: {exc}",
@@ -708,20 +728,7 @@ class InferenceTaskList(Resource):
     """GET /inference-tasks?limit=N —— 最近推理任务（读库）。"""
 
     def get(self):
-        # 与 /trainings 完全同构：_int 归一 + min(...,200) 夹上限，避免一次拉回整张 InferenceTasks 表
-        # ⚠️ `or 20` 的 falsy 语义同上（limit=0 会被换成 20）；这个写法在 /predict 里是致命的，
-        #    在这里只是"0 条没意义"，所以没有拆开写——看到"两处风格不一致"别顺手统一
-        # ⚠️ 与 /trainings 同理：`_int()` 转不动会抛 InvalidInput，本模块没有全局处理器，
-        #    接住后回 400，别让 ?limit=abc 退化成 500。
-        try:
-            limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
-        except InvalidInput as exc:
-            return {"error": str(exc)}, 400
-        try:
-            return {"tasks": database.recent_inference_tasks(limit), "dialect": database.dialect}
-        except DBError as exc:
-            # 503 + dialect：库挂了要让前端说"数据库不可用"，而不是显示成"没有推理任务"
-            return {"error": str(exc), "dialect": database.dialect}, 503
+        return _recent_list("tasks", database.recent_inference_tasks)
 
 
 class InferenceTaskDetail(Resource):
@@ -775,17 +782,36 @@ def _artifact_key(raw: str) -> str:
 
 
 def _safe_model_name(name: str) -> str:
-    """模型名 → **磁盘安全形式**（与 `/models/upload` 的处理保持一致）。
+    """模型名 → **磁盘安全形式**，非法字符**直接拒绝**而不是替换（改名用）。
 
-    非法字符**直接拒绝**而不是替换：改名是有副作用的动作，静默把 `a/b` 变成 `a_b`
-    会让用户以为改成功了。允许中英文、数字、下划线、点、横线。
+    改名是有副作用的动作，静默把 `a/b` 变成 `a_b` 会让用户以为改成功了。
+    同理不设默认名：清洗后为空就是"这个名字不能用"。
     """
-    safe = re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", name).strip("._")
+    safe = _sanitize_name(name, "")
     if not safe:
         raise InvalidInput("模型名不合法（不能只有符号）")
     if safe != name:
         raise InvalidInput(f"模型名只能含中英文、数字、_ - .（收到 {name!r}）")
     return safe
+
+
+def _rewrite_meta_model(directory: Path, model_name: str) -> None:
+    """把 <目录>/*/meta.json 里的 `model` 字段统一改写成 model_name（改名与回滚共用）。
+
+    ⚠️ 无条件改写，**不做** old→new 的相等判断：上传时写进 meta 的 model 大小写可能和目录名不一致
+    （目录 1dcnn、meta 里写的 1DCNN），而 Windows 文件系统大小写不敏感，一比就"看起来相等"从而漏改，
+    改名后 meta 里的模型名会永远停在老写法上。
+    ⚠️ 单个 meta 损坏/非 JSON 直接跳过：改名是有副作用的长流程，为一个坏文件半途而废，
+    会留下"目录搬了、meta 没改"这种更难解释的不一致。
+    """
+    for meta_file in directory.glob("*/meta.json"):
+        try:
+            payload = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            payload["model"] = model_name
+            meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _rename_model(old: str, new: str) -> dict:
@@ -815,18 +841,8 @@ def _rename_model(old: str, new: str) -> dict:
             raise InvalidInput(f"产物目录 data/models/{safe} 已存在，先删掉它或换个名字")
         old_dir.rename(new_dir)                  # 同一磁盘上的重命名，秒完成
         moved = True
-        # 每个版本一个子目录（v1/v2/...），里面各有一份 meta.json，全部要改
-        for meta_file in new_dir.glob("*/meta.json"):
-            try:
-                payload = json.loads(meta_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue                         # 单个 meta 损坏/非 JSON 不能让整次改名失败，跳过继续
-            if isinstance(payload, dict):
-                # ⚠️ 无条件改写，不做 old→new 的相等判断：上传时写进 meta 的 model 大小写可能和目录名
-                # 不一致（比如目录 1dcnn、meta 里写的 1DCNN），而 Windows 文件系统大小写不敏感，
-                # 一比就"看起来相等"从而漏改，于是改名后 meta 里的模型名永远停在老写法上。
-                payload["model"] = safe
-                meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 每个版本一个子目录（v1/v2/...），里面各有一份 meta.json，model 字段全部要跟着改
+        _rewrite_meta_model(new_dir, safe)
     try:
         paths = database.rename_model_paths(key, safe)   # Trainings.ModelPath 等路径前缀
     except DBError:
@@ -851,9 +867,10 @@ def _undo_rename(old: str, new: str) -> None:
     已经搬过目录，用户看到的现象会更乱。所以下面所有失败分支都是 return / pass。
     """
     key = _artifact_key(old)
-    # ⚠️ 这里就地用正则清洗，而不是复用 _safe_model_name()：后者对非法名会 raise InvalidInput，
-    # 回滚路径上不允许再抛异常，清洗不出来就退回原文照搬。
-    safe = re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", new).strip("._") or new
+    # ⚠️ 回滚路径不允许再抛异常（会盖掉"改库为什么失败"这个真正的错误），
+    # 所以这里用不抛异常的 _sanitize_name（而不是会 raise 的 _safe_model_name），
+    # 清洗不出来就退回原文照搬。
+    safe = _sanitize_name(new, new)
     old_dir, new_dir = config.model_dir / key, config.model_dir / safe
     # 三个条件缺一不可：新目录得真的在、老目录不能已被别人占用（占用时宁可不动，避免把人家覆盖掉）、
     # 清洗后的名字确实和老名字不同（相同就没必要搬）
@@ -864,14 +881,7 @@ def _undo_rename(old: str, new: str) -> None:
             # 目录都搬不回去，后面改 meta/路径也没有意义，直接放弃整次回滚
             return
     # 与 _rename_model 对称：目录搬回老名后，各版本 meta 里的 model 也要写回老名
-    for meta_file in old_dir.glob("*/meta.json"):
-        try:
-            payload = json.loads(meta_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(payload, dict):
-            payload["model"] = key
-            meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _rewrite_meta_model(old_dir, key)
     # 路径前缀反向改回（rename_model_paths 是 REPLACE 前缀，反向调用即可复原）。
     # ⚠️ 这步和上面的目录搬回是相互独立的：能走到本函数，就说明 _rename_model 已经完整跑完
     # （它内部的 rename_model_paths 已经把库里路径改成新前缀了，否则会抛 DBError 而不是走到这），
@@ -915,7 +925,7 @@ class ArtifactDetail(Resource):
             return {"error": str(exc)}, 404
         except DBError as exc:
             return {"error": str(exc)}, 409
-        except (ValueError, InvalidInput) as exc:
+        except ValueError as exc:                  # 含 InvalidInput（ValueError 子类）
             return {"error": str(exc)}, 400
 
     def put(self, model_name):
@@ -952,7 +962,7 @@ class ArtifactDetail(Resource):
             return {"error": str(exc)}, 404
         except DBError as exc:
             return {"error": str(exc)}, 409
-        except (ValueError, InvalidInput) as exc:
+        except ValueError as exc:                  # 含 InvalidInput（ValueError 子类）
             return {"error": str(exc)}, 400
         if rename:
             result["rename"] = rename
@@ -1033,52 +1043,31 @@ class ModelUpload(Resource):
     （推理侧按默认 784 处理，想固定就手动补 meta.json）。
     """
 
-    WEIGHT_WHITELIST = WEIGHT_SUFFIXES
-    KEEP_SUFFIX = KEEP_SUFFIXES
     MAX_MB = 500
 
     def post(self):
-        """接收文件夹或若干文件，探测→落盘→登记 Models 表。"""
-        import shutil
-        from .registry import _VERSION_RE, next_version_dir
+        """接收文件夹或若干文件，探测→落盘→登记 Models 表。
 
-        name = (request.form.get("name") or "").strip()
-        files = request.files.getlist("file") or request.files.getlist("files")
+        四步：① 读进内存并分类 → ② 逐个内容探测、定权重 → ③ 落盘 + 写 meta.json → ④ 登记库 + 组装响应。
+        ①③ 的逻辑分别收在 `_upload_blobs()` / `_upload_meta()` 里（本方法只留流程与错误映射）。
+        """
+        form = request.form
+        name = (form.get("name") or "").strip()
+        files = _uploaded_files()
         if not name:
             return {"error": "name（模型名）必填"}, 400
         if not files:
             return {"error": "没有收到文件（表单字段名用 file，可多选/整个文件夹）"}, 400
-        safe = re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", name).strip("._") or "model"
+        safe = _sanitize_name(name, "model")
 
         # 1) 先把文件读进内存并分类，避免半途落盘
-        blobs: dict[str, bytes] = {}
-        skipped, weights, scaler, meta_blob = [], None, None, None
-        candidates: list[tuple[str, str]] = []          # 权重候选：(文件名, 框架)，按上传顺序
-        for item in files:
-            filename = Path((item.filename or "").replace("\\", "/")).name
-            if not filename or filename.startswith("."):
-                continue
-            suffix = Path(filename).suffix.lower()
-            if suffix not in self.KEEP_SUFFIX:
-                skipped.append({"filename": filename, "reason": f"忽略非模型文件（{suffix or '无扩展名'}）"})
-                continue
-            blob = item.read()
-            if len(blob) > self.MAX_MB * 1024 * 1024:
-                skipped.append({"filename": filename, "reason": f"超过 {self.MAX_MB}MB"})
-                continue
-            blobs[filename] = blob
-            if suffix in self.WEIGHT_WHITELIST:
-                candidates.append((filename, self.WEIGHT_WHITELIST[suffix]))
-            if filename == "scaler.npz":
-                scaler = filename
-            if filename == "meta.json":
-                meta_blob = blob
+        blobs, skipped, candidates, scaler, meta_blob = _upload_blobs(
+            files, KEEP_SUFFIXES, WEIGHT_SUFFIXES, self.MAX_MB)
 
-        # 1.5) 判断"这是不是一个模型"：候选逐个做内容探测，第一个通过的当权重
+        # 2) 判断"这是不是一个模型"：候选逐个做内容探测，第一个通过的当权重
         if not candidates:
             return {"error": "上传的内容里没有权重文件，不算模型（支持 .h5/.keras/.pt/.pth/.pkl/.pickle）",
                     "received": sorted(blobs), "skipped": skipped}, 400
-        probe: dict = {}
         probed: list[dict] = []
         for filename, framework in candidates:
             info = probe_weight(filename, blobs[filename])
@@ -1088,7 +1077,7 @@ class ModelUpload(Resource):
             if info["ok"]:
                 weights, probe = (filename, framework), info
                 break
-        if weights is None:
+        else:                       # 一个都没通过 → 不是模型（candidates 非空，所以只有"全不通过"会到这）
             return {"error": "上传的内容不是一个模型：没有任何文件通过权重校验",
                     "detail": probed, "skipped": skipped,
                     "hint": "支持 Keras 的 .h5/.keras（需含 model_weights 组或 config.json）、"
@@ -1111,49 +1100,9 @@ class ModelUpload(Resource):
         try:
             for filename, blob in blobs.items():
                 (target / filename).write_bytes(blob)
-            meta = None
-            if meta_blob:
-                try:
-                    meta = json.loads(meta_blob.decode("utf-8"))
-                except Exception:
-                    meta = None
-            if not meta:      # 缺 meta.json → 用探测结果自己生成（表单里填了就以表单为准）
-                input_len = probe.get("input_len") or _int(request.form.get("input_len"), None, "input_len")
-                num_classes = probe.get("num_classes") or _int(request.form.get("num_classes"), None, "num_classes")
-                labels = [s.strip() for s in (request.form.get("labels") or "").split(",") if s.strip()]
-                if not labels and num_classes == 10:      # CWRU 十类，标签直接给现成的
-                    labels = [label for _, _, label in sorted(ds.CWRU_0HP_CLASSES, key=lambda row: row[1])]
-                meta = {
-                    "model": safe, "version": target.name, "framework": weights[1],
-                    "task": "classification" if weights[1] != "adtk" else "anomaly_detection",
-                    "input_len": input_len, "num_classes": num_classes or (len(labels) or None),
-                    "labels": labels or None, "weights_file": weights[0],
-                    # scaler 只在收到名为 scaler.npz 的文件时才被置位（见上面的落盘循环），
-                    # 而 target 是全新的版本目录，所以"没收到就是没有"——不需要再去磁盘上探一次
-                    "scaler_file": "scaler.npz" if scaler else None,
-                    "params": {"source": "uploaded"}, "metrics": {},
-                    "dataset": {"name": request.form.get("dataset") or None, "path": None, "stats": {}},
-                    "trained_at": None, "uploaded_at": datetime.now().isoformat(timespec="seconds"),
-                    "origin": "POST /models/upload",
-                    "trusted": False,            # 上传的产物一律视为不可信：推理侧不会反序列化它的 .pkl
-                    "provenance": "upload",
-                    "probe": {"weights": weights[0], "framework": weights[1],
-                              "input_len": probe.get("input_len"), "num_classes": probe.get("num_classes"),
-                              "reason": probe.get("reason")},
-                }
-                (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-            else:
-                meta.setdefault("version", target.name)
-                meta.setdefault("weights_file", weights[0])
-                # 上传的 meta.json 是用户提供的，它自称 trusted 也不算数：强制标成不可信
-                meta["trusted"] = False
-                meta["provenance"] = "upload"
-                for key in ("input_len", "num_classes"):   # meta 里缺的，用探测结果补齐
-                    if not meta.get(key) and probe.get(key):
-                        meta[key] = probe[key]
-                if scaler:
-                    meta.setdefault("scaler_file", scaler)
-                (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            # meta.json 只在这里写一次：用户带了就以他的为准，没带就按探测结果现造（_upload_meta 内部判断）
+            meta, meta_generated = _upload_meta(form, safe, target.name, weights, probe, scaler, meta_blob)
+            (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:
             shutil.rmtree(target, ignore_errors=True)
             return {"error": f"落盘失败，已回滚：{type(exc).__name__}: {exc}"}, 500
@@ -1161,13 +1110,12 @@ class ModelUpload(Resource):
         # 4) 登记 Models 表（同名就取用，不重复插）
         model_type = {"classification": "Classification", "anomaly_detection": "AnomalyDetection",
                       "regression": "Regression"}.get(str(meta.get("task") or "").lower(), meta.get("task"))
+        db_error = None
         try:
-            model_id = database.ensure_model(safe, description=request.form.get("description"),
+            model_id = database.ensure_model(safe, description=form.get("description"),
                                              model_type=model_type, status="可运行")
         except DBError as exc:
             model_id, db_error = None, str(exc)
-        else:
-            db_error = None
 
         warnings = []
         if not meta.get("input_len"):
@@ -1181,7 +1129,7 @@ class ModelUpload(Resource):
             "framework": meta.get("framework"), "weights": meta.get("weights_file") or weights[0],
             "input_len": meta.get("input_len"), "num_classes": meta.get("num_classes"),
             "labels": meta.get("labels"), "scaler": meta.get("scaler_file"),
-            "meta_generated": not bool(meta_blob),
+            "meta_generated": meta_generated,
             "probe": {"weights": weights[0], "framework": weights[1], "reason": probe.get("reason"),
                       "input_len": probe.get("input_len"), "num_classes": probe.get("num_classes")},
             "probed_files": probed,
@@ -1190,6 +1138,96 @@ class ModelUpload(Resource):
             "db": {"written": db_error is None, "ModelID": model_id, "ModelName": safe, "error": db_error},
             "hint": f"现在可以在「推理」里选 {safe}（输入长度 {meta.get('input_len') or '默认 784'}）",
         }, 201
+
+
+def _uploaded_files():
+    """multipart 里的文件列表：`file` 是主字段名，`files` 是同义旧写法（两个上传接口共用）。
+
+    取不到就是空列表 —— 调用方据此回 400，不必自己判 None。
+    """
+    return request.files.getlist("file") or request.files.getlist("files")
+
+
+def _upload_blobs(files, keep_suffix, weight_whitelist, max_mb):
+    """把上传的文件读进内存并按用途分堆，返回 (blobs, skipped, candidates, scaler, meta_blob)。
+
+    先按扩展名与大小筛一遍再 read()：整套流程是"先全部读进来、确认是模型、才落盘"，
+    所以被忽略的文件既不占内存，也不该留下半个目录。
+    """
+    blobs: dict[str, bytes] = {}
+    skipped: list[dict] = []
+    candidates: list[tuple[str, str]] = []      # 权重候选：(文件名, 框架)，按上传顺序
+    scaler = meta_blob = None
+    for item in files:
+        # 浏览器传文件夹时 filename 可能带 `子目录\文件`，统一削成纯文件名（顺带挡掉路径穿越）
+        filename = Path((item.filename or "").replace("\\", "/")).name
+        if not filename or filename.startswith("."):
+            continue                            # 目录里的隐藏文件，静默忽略，不进 skipped
+        suffix = Path(filename).suffix.lower()
+        if suffix not in keep_suffix:
+            skipped.append({"filename": filename, "reason": f"忽略非模型文件（{suffix or '无扩展名'}）"})
+            continue
+        blob = item.read()
+        if len(blob) > max_mb * 1024 * 1024:
+            skipped.append({"filename": filename, "reason": f"超过 {max_mb}MB"})
+            continue
+        blobs[filename] = blob
+        if suffix in weight_whitelist:
+            candidates.append((filename, weight_whitelist[suffix]))
+        if filename == "scaler.npz":
+            scaler = filename
+        if filename == "meta.json":
+            meta_blob = blob
+    return blobs, skipped, candidates, scaler, meta_blob
+
+
+def _upload_meta(form, safe, version_name, weights, probe, scaler, meta_blob):
+    """决定落盘的 meta.json 内容，返回 (meta, generated)。
+
+    用户带了 meta.json 就**以他的为准**（只补缺失项），没带就按探测结果现造一份；
+    `generated` 回报"这份是我们生成的"，响应里的 meta_generated 用它。
+    """
+    if meta_blob:
+        try:
+            meta = json.loads(meta_blob.decode("utf-8"))
+        except Exception:
+            meta = None                         # 坏 JSON 当"没带"，退回自动生成，不让整个上传失败
+        if isinstance(meta, dict):
+            meta.setdefault("version", version_name)
+            meta.setdefault("weights_file", weights[0])
+            # ⚠️ 上传的 meta.json 是用户提供的，它自称 trusted 也不算数：强制标成不可信
+            meta["trusted"] = False
+            meta["provenance"] = "upload"
+            for key in ("input_len", "num_classes"):   # meta 里缺的，用探测结果补齐
+                if not meta.get(key) and probe.get(key):
+                    meta[key] = probe[key]
+            if scaler:
+                meta.setdefault("scaler_file", scaler)
+            return meta, False
+
+    input_len = probe.get("input_len") or _int(form.get("input_len"), None, "input_len")
+    num_classes = probe.get("num_classes") or _int(form.get("num_classes"), None, "num_classes")
+    labels = [s.strip() for s in (form.get("labels") or "").split(",") if s.strip()]
+    if not labels and num_classes == 10:       # CWRU 十类，标签直接给现成的
+        labels = [label for _, _, label in sorted(ds.CWRU_0HP_CLASSES, key=lambda row: row[1])]
+    return {
+        "model": safe, "version": version_name, "framework": weights[1],
+        "task": "classification" if weights[1] != "adtk" else "anomaly_detection",
+        "input_len": input_len, "num_classes": num_classes or (len(labels) or None),
+        "labels": labels or None, "weights_file": weights[0],
+        # scaler 只在收到名为 scaler.npz 的文件时才被置位（见 _upload_blobs），
+        # 而版本目录是全新的，所以"没收到就是没有"——不需要再去磁盘上探一次
+        "scaler_file": "scaler.npz" if scaler else None,
+        "params": {"source": "uploaded"}, "metrics": {},
+        "dataset": {"name": form.get("dataset") or None, "path": None, "stats": {}},
+        "trained_at": None, "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+        "origin": "POST /models/upload",
+        "trusted": False,                      # 上传的产物一律视为不可信：推理侧不会反序列化它的 .pkl
+        "provenance": "upload",
+        "probe": {"weights": weights[0], "framework": weights[1],
+                  "input_len": probe.get("input_len"), "num_classes": probe.get("num_classes"),
+                  "reason": probe.get("reason")},
+    }, True
 
 
 class ModelCreate(Resource):
@@ -1341,9 +1379,15 @@ class DatasetSignal(Resource):
         # 采样点数两头都要夹：上万个点浏览器画不动，几十个点又看不出波形，所以夹在 200..4000。
         # ⚠️ 这里用了 `or 1500`（0/None 都会退到默认值）——points=0 本来就没意义，退默认可接受；
         # 但**别把这个写法照抄到 limit 那种 0 有语义的参数上**（Predict.post 里就专门避开了这个坑）
-        points = min(max(_int(request.args.get("points"), 1500, "points") or 1500, 200), 4000)
-        # start 是"从第几个采样点开始取"，负数会让 Python 从尾部数（切出错位窗口），所以夹到 ≥0
-        start = max(_int(request.args.get("start"), 0, "start") or 0, 0)
+        # ⚠️ 这两个 _int 必须包在 try 里：转不动会抛 InvalidInput，而 flask_restful 会把它变成
+        #    500 {"message": "Internal Server Error"}（Flask 的 errorhandler 够不着，见 register_api 末尾）。
+        #    别处的参数错都回 400，这里漏包就会变成同一份 API 两种口径（?points=abc 曾经就是 500）。
+        try:
+            points = min(max(_int(request.args.get("points"), 1500, "points") or 1500, 200), 4000)
+            # start 是"从第几个采样点开始取"，负数会让 Python 从尾部数（切出错位窗口），所以夹到 ≥0
+            start = max(_int(request.args.get("start"), 0, "start"), 0)
+        except InvalidInput as exc:
+            return {"error": str(exc)}, 400
         column = request.args.get("column")
         sheet = request.args.get("sheet")
 
@@ -1394,11 +1438,10 @@ class DatasetSignal(Resource):
                 # .mat：读 CWRU 的 DE 通道，再拿文件名去 10 类表反查类别 ID
                 # （反查不到就只保留 guess_label 的猜测标签、class_id 留 None，这不算错误）
                 signal = ds.read_de_channel(path)
-                label, class_id, kind = ds.guess_label(path.name), None, "matlab"
-                for fname, cid, lab in ds.CWRU_0HP_CLASSES:
-                    if fname == path.name:
-                        label, class_id = lab, cid
-                        break
+                # 拿文件名去 10 类表反查类别 ID；反查不到就只保留 guess_label 的猜测标签、
+                # class_id 留 None，这不算错误
+                hit = next((row for row in ds.CWRU_0HP_CLASSES if row[0] == path.name), None)
+                label, class_id, kind = (hit[2], hit[1], "matlab") if hit else (ds.guess_label(path.name), None, "matlab")
         except Exception as exc:
             # 文件损坏、列名对不上、不是数值列……统一算"读不出来"：给 500 但带上原始异常类型，便于定位
             return {"error": f"读取信号失败：{type(exc).__name__}: {exc}"}, 500
@@ -1567,6 +1610,11 @@ def register_api(api) -> None:
     # 但放在这里能保证"谁用 register_api 谁就自动带上出口脱敏"——漏挂一次，所有响应都在裸奔真实路径。
     # 注意这里传的是 flask_restful.Api 对象本身（_install_path_mask 内部自己取 api.app）
     _install_path_mask(api)          # 出口脱敏：响应里不再出现本机真实目录
+
+    # ⚠️ 别试图用 @app.errorhandler(InvalidInput) 把各方法里的 try/except 收成一处：flask_restful
+    # 先接管异常（Api.error_router → handle_error），非 HTTPException 一律变成 500，够不到 Flask。
+    # 它只在 PROPAGATE_EXCEPTIONS 为真（debug/testing 打开）时才漏过去 —— 那会让同一份代码在
+    # debug 与非 debug 下表现不同，比多写几行 try/except 危险。所以"参数错 → 400"就显式写在各方法里。
 
 
 # ============================================ 响应脱敏：不把本机真实目录暴露给前端

@@ -19,7 +19,7 @@ Web服务器 ─▶ flask_restful 接口(Web访问) ─┬─▶ 算法模型1(1
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| GET | **`/ui`** | **零构建单页控制台**（训练 / 推理 / 记录 / 图库），`/` 会跳到它 |
+| GET | `/` | 接口索引（等同 `/api`；原先 302 跳到已删除的 `/ui` 控制台） |
 | GET | `/api` | 接口索引 |
 | GET | `/health` | 服务 / 数据库 / 产物体检 |
 | GET | `/models` | 落盘产物 + 库表登记的模型清单 |
@@ -56,23 +56,6 @@ curl -X POST http://127.0.0.1:5000/predict -H "Content-Type: application/json" \
 `POST /train` 常用参数：`epochs` `batch_size` `number` `length` `stride` `rate` `seed`
 `strict`（是否跳过越界窗口）`legacy_scaler`（是否复刻旧脚本的标准化口径）；
 adtk 另有 `detector` `k` `baseline_file` `max_points` `factor`。
-
-## 一·补、单页控制台（`GET /ui`）
-
-浏览器打开 **http://127.0.0.1:5000/ui** 就能用：不装 npm、不打包、不带任何前端依赖，
-一个 `console.html`（内联 CSS/JS）由 Flask 直接吐出来。五个页签对应上面的接口：
-
-- **概览**：`/health` 状态、数据库方言与目标、各表行数、模型产物清单（可点开 meta.json）、数据集体检
-- **训练**：选模型与超参 → `POST /train`（同步阻塞，页面实时计时）→ 指标、跳过窗口数、写库回执、训练图、classification_report
-- **推理**：选文件与窗口区间（下拉里直接标出真实类别与可用 index 范围）→ `POST /predict` → 每条样本的预测/置信度/top-2/命中，以及预测分布图与窗口波形图
-- **记录**：`/trainings`、`/inference-tasks` 列表，点「明细」看 `InferenceResults` 逐行
-- **图库**：`/figures` 全部 PNG，点击放大
-
-实现细节：原生 JS + `fetch`，错误处理直接把后端 `{"error": ...}` 的文案透出来（这点比套后台框架更省事——
-比如 django-vue3-admin 的 axios 拦截器会把它吞成 statusText）。
-
-> 路径为什么是 `/ui` 不是 `/console`：Flask 开 `debug=True` 时，Werkzeug 的调试器独占了 `/console`
-> （浏览器打开会是它那个 "Confirm Pin" 页面）。
 
 ## 二、产物约定（流程图里的「Pxl模型」）
 

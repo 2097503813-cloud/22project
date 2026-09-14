@@ -3,6 +3,7 @@
 
 路由一览：
 
+    GET  /                         接口索引（等同 /api，方便浏览器直接敲 127.0.0.1:5000/）
     GET  /api                      接口索引
     GET  /health                   服务 / 数据库 / 模型产物体检
     GET  /models                   模型清单（落盘产物 + 库表登记）
@@ -27,7 +28,8 @@ from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from flask import Response, redirect, request, send_from_directory
+# Response / redirect 已随零构建控制台（console.html + GET /ui）一起删掉，如无新用途别再 import
+from flask import request, send_from_directory
 from flask_restful import Resource
 
 from . import datasets as ds
@@ -39,7 +41,8 @@ from .inference import InvalidInput, predict
 from .registry import delete_version, list_artifacts, load_artifact
 from .training import MODEL_META, ALIASES, normalize_model, train
 
-CONSOLE_HTML = Path(__file__).with_name("console.html")
+# CONSOLE_HTML（指向同目录的 console.html）已删除：那个零构建单页控制台 GET /ui 的功能
+# 被 Vue 前端完全覆盖，属于重复实现，按用户要求连同文件一起清掉，避免留下死路径常量。
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")          # 训练日志里 Keras 进度条的转义序列
 _PACKAGES = ("numpy", "pandas", "scikit-learn", "scipy", "matplotlib", "h5py", "flask",
@@ -282,7 +285,8 @@ class ApiIndex(Resource):
             "service": "model_service",
             "flow": "Web访问 → 算法模型 → 训练 → 数据集 → 模型产物 → 推理 → (边缘设备)",
             "endpoints": {
-                "GET /ui": "单页控制台（首页/模型管理/数据集管理/数据展示/系统管理）",
+                # "GET /ui"（零构建单页控制台）已删除，此处同步移除，避免索引里出现打不开的死路由
+                "GET /": "本索引（根路径，等同 /api）",
                 "GET /api": "本索引",
                 "GET /health": "服务/数据库/产物体检",
                 "GET /models": "模型清单（产物 + 库表）",
@@ -1297,25 +1301,21 @@ class FigureFile(Resource):
         return send_from_directory(FIG_DIR, relpath, conditional=True)
 
 
-class Console(Resource):
-    """GET /ui —— 零构建单页控制台：一个 HTML（内联 CSS/JS）直接由 Flask 吐出，不需要 npm/打包。
-
-    路径用 /ui 而不是 /console：Flask 开 debug=True 时，Werkzeug 的调试器会独占
-    `/console`（浏览器打开会是它的 "Confirm Pin" 页面，而不是我们的控制台）。
-    """
-
-    def get(self):
-        # 每次请求都重新读盘（不缓存在模块变量里），配合下面的 no-store，改完 console.html 刷新即生效
-        # no-store：控制台改完刷新就能看到，不用手动清缓存
-        html = CONSOLE_HTML.read_text(encoding="utf-8")
-        return Response(html, mimetype="text/html", headers={"Cache-Control": "no-store"})
+# class Console(Resource)（GET /ui，零构建单页控制台）已整类删除：它每次请求读盘吐 console.html，
+# 与 Vue 前端功能重叠，属于第二套 UI。删除后 /ui 不再注册路由 → 返回 404。
+# 备注：当初路径选 /ui 而不是 /console，是因为 Flask debug=True 时 Werkzeug 调试器独占 /console。
 
 
 class Root(Resource):
-    """GET / —— 根路径直接把人送到控制台，避免 127.0.0.1:5000/ 看到 404。"""
+    """GET / —— 根路径直接返回接口索引，避免 127.0.0.1:5000/ 看到 404。
+
+    原先是 `redirect("/ui")`（302 跳到零构建控制台）。控制台删除后这里不能再指向死地址，
+    改为返回与 GET /api 完全一致的索引 JSON，让根路径仍然是个"有东西可看"的入口。
+    """
 
     def get(self):
-        return redirect("/ui")                   # 302 到 /ui，前端书签只记一个地址
+        # 直接复用 ApiIndex 的返回，保证「根路径」和「/api」永远是同一份清单，不出现第二份手写副本
+        return ApiIndex().get()
 
 
 # ============================ 数据集管理 / 数据展示 ============================
@@ -1548,9 +1548,9 @@ class Maintenance(Resource):
 
 def register_api(api) -> None:
     """把资源挂到 flask_restful.Api 上（由 main.py 调用）。"""
-    # 基础页：/ 与 /ui 是同一张控制台；/api 是自描述清单（人/脚本查有哪些接口）；/health 给探活用
+    # 基础页：/ 返回接口索引（等同 /api）；/api 是自描述清单（人/脚本查有哪些接口）；/health 给探活用
     api.add_resource(Root, "/")
-    api.add_resource(Console, "/ui")
+    # api.add_resource(Console, "/ui") 已删除：零构建控制台下线，不再暴露 /ui
     api.add_resource(ApiIndex, "/api")
     api.add_resource(Health, "/health")
     # ⚠️ `/models` 注册了两次是**故意的**：ModelList 只实现 GET、ModelCreate 只实现 POST，

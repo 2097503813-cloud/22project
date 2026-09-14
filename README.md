@@ -1,4 +1,4 @@
-﻿# 东风设备轴承故障诊断模型管理平台
+# 东风设备轴承故障诊断模型管理平台
 
 把「轴承振动数据 → 训练模型 → 版本化产物 → 在线推理 → 落库 → Web 展示」串成一条**能真跑通**的流水线。
 后端 Flask + flask-restful，前端 Vue3 + Element Plus，数据落 MySQL，模型产物按版本落磁盘。
@@ -121,13 +121,15 @@ npm run dev        # → http://127.0.0.1:8080
 
 默认账号：任意用户名 + 任意密码（兼容层不校验），进入后左侧是 5 个业务菜单。
 
-### 三个地址
+### 两个地址
 
 | 地址 | 说明 |
 |---|---|
 | http://127.0.0.1:5000/api | 接口索引（JSON，列出所有业务接口） |
-| http://127.0.0.1:5000/ui | 零构建调试控制台（备用入口，不依赖 npm） |
 | http://127.0.0.1:8080 | 平台前端 |
+
+> 原先还有一个 `http://127.0.0.1:5000/ui` 的零构建调试控制台（`console.html`），
+> 功能已被 Vue 前端完全覆盖，已连同 `console.html` 一起删除；后端现在只有 `/` 与 `/api` 两个 JSON 入口。
 
 ---
 
@@ -189,8 +191,7 @@ D:\22project\
 │  │  ├─ datasets.py / tabular.py        两套数据源
 │  │  ├─ registry.py                     产物版本管理
 │  │  ├─ db.py                           8 张表的读写
-│  │  ├─ figures.py / config.py
-│  │  └─ console.html                    零构建控制台
+│  │  └─ figures.py / config.py
 │  ├─ 1DCNN\  cwt_cnn\  adtk\            原始算法脚本 + vendored adtk 库
 │  ├─ data\models\<模型>\vN\             ★ 模型产物
 │  ├─ data\datasets\<数据集>\            ★ 上传的表格数据集

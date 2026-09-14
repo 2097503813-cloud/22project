@@ -32,14 +32,20 @@ from .db import DBError, database
 from .figures import training_figures
 from .registry import save_artifact
 
-# 别名表：接口上写「算法模型1」「cnn」「pytorch」都能落到同一个内部键，
-# 内部键同时是 data/models/<键> 的目录名，别随意改
+# 别名表：把用户可能写的各种叫法（英文缩写 / 中文「算法模型N」/ 框架名）统一落到同一个**内部键**上。
+# 内部键同时是 data/models/<键>/ 的目录名与 _TRAINERS 的字典键，所以这张表的**值不能随便改**。
+# ⚠️ 这里就是"模型名三套写法"的源头：接口别名 →(本表) 内部键 →(MODEL_META) 库表 Models 里的名字。
+#    新增一个模型要同时改三处（ALIASES / MODEL_META / _TRAINERS），漏一处就变成"别名认得、但查不到库名"。
 ALIASES = {
     "1dcnn": "1dcnn", "1d-cnn": "1dcnn", "cnn": "1dcnn", "算法模型1": "1dcnn", "模型1": "1dcnn",
     "cwt_cnn": "cwt_cnn", "cwt": "cwt_cnn", "pytorch": "cwt_cnn", "算法模型2": "cwt_cnn", "模型2": "cwt_cnn",
     "adtk": "adtk", "pcaad": "adtk", "异常检测": "adtk", "算法模型3": "adtk", "模型3": "adtk",
 }
-# 每个内部键在 Models 表里的登记信息（db_name 与 sql/schema*.sql 的种子数据保持一致）
+# 内部键 → 在 Models 表里的登记信息（db_name 与 sql/schema_mysql.sql 的种子数据保持一致）。
+# db_name 是这个模型在库里的**正式名字**，description/type 是首次登记时写进去的元数据；
+# type 只有 Classification / AnomalyDetection 两种取值（对应 schema 里的枚举），
+# 训练落库时写进 Models.ModelType，api 也把整张表当 known_models 发给前端（推理分派不看这里）。
+# ⚠️ db_name 必须与种子数据逐字一致（1DCNN 是全大写），否则库里会多出一个"看着同名、其实另一行"的模型。
 MODEL_META = {
     "1dcnn": {"db_name": "1DCNN",
               "description": "一维卷积神经网络，CWRU 轴承振动信号 10 类故障分类。", "type": "Classification"},
@@ -51,13 +57,24 @@ MODEL_META = {
 
 
 def db_model_name(name: str) -> str:
-    """服务内部的模型键（1dcnn）与库表 Models 里的名字（1DCNN，schema 种子数据）大小写不同，
-    统一在这里转换，避免在 Models 表里插出重复的 '1DCNN' / '1dcnn' 两行。"""
+    """内部键（1dcnn）→ 库表 Models 里的名字（1DCNN，与 schema 种子数据一致）。
+
+    为什么中间要多这一层换算：内部键是服务自己用的短名、还要当目录名，而库名是 sql/schema_mysql.sql
+    种子数据定下的既有写法，两边都不宜为了对齐而改动，所以统一收在这个函数里换算。
+    认不出的键**原样返回**：上传/自定义模型的名字不在别名表里，本来就该直接落库。
+    ⚠️ 这是三套写法的第二跳：接口别名 --normalize_model--> 内部键 --db_model_name--> 库名；
+    任何要走库的入口都必须跳完这两跳，否则就会出现"库里有行、但按内部键查不到"。
+    """
     return MODEL_META.get(name, {}).get("db_name", name)
 
 
 def normalize_model(name: str | None, default: str = "1dcnn") -> str:
-    """把用户写的模型名（别名/大小写/中文）规范成内部键；不认识就抛 ValueError。"""
+    """把用户写的模型名（别名 / 大小写 / 中文）规范成内部键；不认识就抛 ValueError。
+
+    先 strip().lower() 再查表，所以 'CWT_CNN'、' CNN ' 这类写法都能认出来。
+    不给 name 时返回 default（/train 不指定模型就训 1dcnn，是既定默认行为）。
+    ⚠️ 认不出来时直接抛 ValueError，**不退回默认值**——静默换成另一个模型去训练，用户从返回里看不出来。
+    """
     if not name:
         return default
     key = str(name).strip().lower()
@@ -67,7 +84,22 @@ def normalize_model(name: str | None, default: str = "1dcnn") -> str:
 
 
 def _seed_everything(seed: int) -> None:
-    """只对**已经导入**的框架设种子，避免为了设种子把 TF 也拖进来。"""
+    """尽力而为的随机源对齐：python random 与 numpy 立刻设，TF / torch 只在**已导入**时才设。
+
+    为什么要加"已导入"这个条件：本模块要求框架延迟导入（Flask 启动不许加载几百 MB 的 TF），
+    为了设种子去 import tensorflow 等于把这条原则废掉；代价是"框架尚未导入就调用 = 那次没设上种子"，
+    所以调用点都排在框架 import 之后（如 _train_cwt_cnn 在 import torch 之后、build_model 之前）。
+    TF / torch 的调用都套了 suppress(Exception)：不同版本的 API 差异不该让训练整体崩掉。
+
+    ⚠️ **没覆盖到**的随机源（要严格复现得自己补）：
+      * PYTHONHASHSEED —— 必须在进程启动前由环境变量给定，运行时改不了，
+        所以同一进程内 dict/set 的遍历顺序仍可能和别次不同；
+      * Keras 自己那套随机源 —— 这里只设了 tf.random.set_seed，没调 keras.utils.set_random_seed；
+        Keras 3（TF ≥ 2.16 默认自带）的 dropout / 权重初始化用的是它自己的生成器，不受 tf.random 管
+        （Keras 2 老版本上 tf.random.set_seed 还能兜住，所以这条**随 TF 版本而变**，别当成永远成立）；
+      * torch 的 cudnn 确定性 —— 只 manual_seed，没有 use_deterministic_algorithms()、
+        也没关 cudnn.benchmark，GPU 上仍会非确定（本项目在 CPU 上跑，影响有限）。
+    """
     random.seed(seed)
     np.random.seed(seed)
     if "tensorflow" in sys.modules:
@@ -79,7 +111,11 @@ def _seed_everything(seed: int) -> None:
 
 
 def _log_path(model: str) -> Path:
-    """这次训练的输出文件名（起止时间靠文件名区分，内容由 train() 重定向 stdout 写入）。"""
+    """这次训练的输出文件名（起止时间靠文件名区分，内容由 train() 重定向 stdout 写入）。
+
+    ⚠️ 时间戳只精确到**秒**：同一秒内对同一个模型连开两次训练会算出同一个名字，
+    后一次会把前一次的日志覆盖掉——排查"上一次为什么失败"时就只剩这一次的内容了。
+    """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return config.log_dir / f"train-{model}-{stamp}.log"
 
@@ -87,7 +123,10 @@ def _log_path(model: str) -> Path:
 def _import_project_module(dir_name: str, module_name: str):
     """把项目子目录塞进 sys.path 后导入模块。
 
-    1DCNN.py 的文件名以数字开头，没法用 `import` 语句，只能走 importlib。
+    1DCNN.py 的文件名以数字开头，没法用 `import` 语句，只能走 importlib（这也是必须走 importlib 的原因）。
+    插到 sys.path[0] 是为了让子目录里的模块名优先命中本项目的文件；
+    ⚠️ 这是**进程级全局副作用**且只增不减：导入过的目录会一直留在 sys.path 里，
+    子目录若有同名模块，后一次导入会直接命中 sys.modules 的缓存，拿到的是先导入的那个对象。
     """
     d = str(config.project_dir / dir_name)
     if d not in sys.path:
@@ -356,7 +395,14 @@ def _train_cwt_cnn(opts: dict) -> dict:
 
 # =========================================================== 算法模型3：adtk
 def adtk_slice_windows(signal: np.ndarray, length: int, number: int, stride: int) -> np.ndarray:
-    """把一段长信号切成 (number, length) 的窗口矩阵（不够一个窗就停，不补零）。"""
+    """把一段长信号切成 (number, length) 的窗口矩阵（不够一个窗就停，不补零）。
+
+    返回矩阵**行 = 一个窗口**，这正是 adtk 需要的形状：PcaAD 会把 DataFrame 的每一行当一个高维样本点，
+    所以这里必须"一行一个窗"，而不是"一行一个采样点"（后者会让 PCA 退化成 1 维，见 _train_adtk 的说明）。
+    ⚠️ 两个刻意取舍：窗不够长就 break（**不补零**——补零会造出虚假的"平稳段"，把正常基线算歪）；
+    一个窗都切不出来时返回 shape=(0, length) 而非空列表，好让调用方直接看 shape[0] 判数量、不炸。
+    stride < length 时相邻窗重叠、信息有重复，默认 stride=length（不重叠）。
+    """
     windows = []
     for index in range(int(number)):
         start = index * int(stride)
@@ -370,8 +416,11 @@ def adtk_slice_windows(signal: np.ndarray, length: int, number: int, stride: int
 def adtk_window_features(window: np.ndarray, sampling_rate: float, bands: int = 6) -> np.ndarray:
     """一个窗口 → 特征向量：时域 4 个统计量 + `bands` 个频带能量比。
 
-    频带按 0..fs/2 等分（换采样率也能用）；用**能量占比**而不是绝对能量，
-    因为真正区分轴承故障的是"能量往高频搬"，与整体幅值大小无关。
+    频带按 0..fs/2 等分（rfft 只取正频率，上界正好是奈奎斯特频率，换采样率也能用）；
+    用**能量占比**而不是绝对能量，因为真正区分轴承故障的是"能量往高频搬"，与整体幅值大小无关。
+    先减均值再算：不去直流的话，0Hz 分量会吃掉绝大部分能量，所有频带占比被压扁到看不出差别。
+    ⚠️ 每个分母都加 1e-12：常值/掉线信号（幅值恒为 0）原本会算出 0/0=nan，nan 喂进 PCA 会污染整个拟合；
+    加 eps 后至少得到一个有限值。最后一维是峰值因子 peak/rms —— 它对冲击（点蚀的典型表现）比 RMS 敏感。
     """
     x = np.asarray(window, dtype=float)
     x = x - x.mean()
@@ -514,6 +563,7 @@ def _train_adtk(opts: dict) -> dict:
 
 
 # ================================================================== 统一入口
+# 内部键 → 训练函数的分派表：键必须与 ALIASES 的值、data/models/<目录名> 三处严格一致（见文件头 ALIASES 的说明）
 _TRAINERS = {"1dcnn": _train_1dcnn, "cwt_cnn": _train_cwt_cnn, "adtk": _train_adtk}
 
 

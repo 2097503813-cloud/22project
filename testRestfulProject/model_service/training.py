@@ -486,7 +486,17 @@ _TRAINERS = {"1dcnn": _train_1dcnn, "cwt_cnn": _train_cwt_cnn, "adtk": _train_ad
 
 
 def train(model: str | None = None, options: dict | None = None) -> dict:
-    """训练一个模型：落盘产物 + 写 Trainings（外键顺序 Datasets → Models → Trainings）。"""
+    """训练一个模型：跑训练 → 落盘产物 → 出图 → 按外键顺序写库，最后返回一份可读报告。
+
+    四步走，任何一步失败都**不会**让接口静默成功：
+
+        ① 建日志 + 劫持 stdout → 交给对应 trainer 去练（权重先留在内存）
+        ② save_artifact 落盘：data/models/<名>/vN/{权重, scaler.npz, meta.json}
+        ③ 出图（失败只记 figures_error，不影响训练结论）
+        ④ 写库 Datasets → Models → Trainings（连失败也写一行 Status=失败，便于追溯）
+
+    注意 `/train` 是**同步阻塞**的：本函数返回时训练已经结束（1DCNN 10 轮约 15 秒）。
+    """
     options = dict(options or {})
     name = normalize_model(model)
     started = datetime.now()
@@ -495,10 +505,17 @@ def train(model: str | None = None, options: dict | None = None) -> dict:
                     "log_file": str(log_path)}
 
     try:
+        # ① 训练：把 stdout 重定向进日志文件。这样 Keras/PyTorch 的进度条与 trainer 里 print
+        #    的中间信息全进 data/logs/train-<模型>-<时间戳>.log，出问题能完整回放，
+        #    而不是只剩最后一行报错。代价：redirect_stdout 是**进程级**的，并发训练会串日志。
         with open(log_path, "w", encoding="utf-8") as log, contextlib.redirect_stdout(log):
             print(f"=== /train {name} 参数：{json.dumps(options, ensure_ascii=False, default=str)}\n")
-            payload = _TRAINERS[name](options)
+            payload = _TRAINERS[name](options)      # 三个 trainer 之一，返回结构统一的 payload
 
+        # ② 落盘：saver 是 trainer 塞进 payload 的回调，各框架保存方式不同（.h5/.pt/pickle），
+        #    由 trainer 决定怎么写；这里只管"版本目录 + meta.json + 失败回滚"这套公共约定。
+        #    lib 里的字段全是"产物自解释"所必需的：input_len 决定推理切多长的窗，
+        #    labels 让模型文件能解释 0..9 对应哪种故障，dataset.stats 记录数据指纹。
         saver = payload.pop("saver")
         artifact = save_artifact(name, payload["framework"], saver, {
             "model": name,

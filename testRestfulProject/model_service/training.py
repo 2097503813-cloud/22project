@@ -259,6 +259,8 @@ def _train_cwt_cnn(opts: dict) -> dict:
     网络结构与训练循环都来自 cwt_cnn/cwt_cnn_pytorch.py（build_model/train_model/evaluate），
     这里只负责把数据切窗、送进设备、收集指标。
     """
+    # 超参默认值与 1DCNN 不同：number 只取 300（1DCNN 是 600），因为这边是**全批量**训练，
+    # 一次把全部训练窗送进网络，窗数翻倍内存也翻倍；rate 也更偏向训练集（0.5/0.25/0.25）。
     length = int(opts.get("length", 784))
     number = int(opts.get("number", 300))
     stride = int(opts.get("stride", 150))
@@ -267,20 +269,30 @@ def _train_cwt_cnn(opts: dict) -> dict:
     lr = float(opts.get("lr", 1e-3))
     seed = int(opts.get("seed", 42))
 
+    # 数据源解析与切窗复用同一套（matlab/表格都支持），返回的 data 里已经切好 train/valid/test
     dataset_name, dataset_dir, dataset_kind, data = load_dataset(opts, length, number, stride, rate)
 
-    mod = _import_project_module("cwt_cnn", "cwt_cnn_pytorch")
+    mod = _import_project_module("cwt_cnn", "cwt_cnn_pytorch")   # 复用原项目的网络与训练循环
     import torch
-    _seed_everything(seed)
+    _seed_everything(seed)          # 必须在 build_model 之前调用，否则权重初值不可复现
 
+    # 设备：有 GPU 就用（本项目在 CPU 上跑，50 轮约 25 秒）
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # ⚠️ 张量形状与 1DCNN **相反**：PyTorch 的 Conv1d 是"通道在前"，
+    #    所以是 (n, 1, length) 而不是 Keras 的 (n, length, 1)。写反了能跑但准确率会崩。
     x_train = torch.tensor(data["X_train"].reshape(-1, 1, length), dtype=torch.float32).to(device)
     y_train = torch.tensor(data["y_train"].astype(np.int64), dtype=torch.long).to(device)
     x_test = torch.tensor(data["X_test"].reshape(-1, 1, length), dtype=torch.float32).to(device)
     y_test = torch.tensor(data["y_test"].astype(np.int64), dtype=torch.long).to(device)
 
+    # 模型结构与训练循环都在原脚本里（build_model / train_model / evaluate），本函数只做编排；
+    # 类别数是**动态传入**的（不像 1DCNN 那样写死 10），所以表格数据集类别数变化也能用。
     model = mod.build_model(num_classes=len(data["labels"]), length=length).to(device)
+    # train_model 内部是"每个 epoch 一次全量梯度"（等价于 batch_size = 整批），
+    # 所以 params 里 batch_size 记 0 —— 它是个约定值，表示"没用小批量"
     losses = mod.train_model(model, x_train, y_train, epochs=epochs, lr=lr, device=device)
+    # 注意 X_valid 在这里**没有被使用**：它既不参与训练也不参与早停，
+    # 因此 metrics 里 val_accuracy/val_loss 恒为 None（前端那两栏会显示"—"）
     accuracy, report = mod.evaluate(model, x_test, y_test, device=device)
 
     # 出一张混淆矩阵图需要原始预测；evaluate 只回文本报告，这里再取一次预测

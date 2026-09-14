@@ -193,14 +193,13 @@ class Config:
             "env_file": ENV_FILE,                 # None = 没有 db.env 或一行都没生效
             "db": {
                 "dialect": self.db_dialect,
-                # ⚠️ 下面三行的 `!= "sqlite"` 三元是老代码留下的**死分支**：
-                # self.db_dialect 只能是 mysql（别的取值在 __init__ 就抛错），所以判断恒为真、
-                # else 分支永远走不到。而且 else 里引用的 `self.sqlite_path` 在本类里根本不存在
-                # （模块级常量叫 SQLITE_PATH，没挂到实例上），一旦哪天放开 sqlite 这里会直接
-                # AttributeError。现在保留原样只为不改行为，不要照着它去"补" sqlite 支持。
-                "host": self.db_host if self.db_dialect != "sqlite" else None,
-                "port": self.db_port if self.db_dialect != "sqlite" else None,
-                "database": self.db_name if self.db_dialect != "sqlite" else str(self.sqlite_path),
+                # 本项目只支持 MySQL，这里不再有任何方言分支：原先是 `x if dialect != "sqlite" else ...`
+                # 三元，但 dialect 在 __init__ 里已被强制成 mysql（别的取值直接 RuntimeError），判断恒真、
+                # else 永远走不到；而且 else 引用的 self.sqlite_path 属性在本类里早已不存在，
+                # 一旦真放开 sqlite 就会 AttributeError —— 死分支反而成了陷阱，故直接返回值。
+                "host": self.db_host,
+                "port": self.db_port,
+                "database": self.db_name,
             },
             "datasets": {k: str(v) for k, v in self.dataset_dirs.items()},
             "upload_dir": str(self.upload_dir),

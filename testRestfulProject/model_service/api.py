@@ -487,11 +487,13 @@ class TablePreview(Resource):
         try:
             # rows = 预览多少行（前端表格默认显示 20 行）。⚠️ `or 20` 在 rows=0 时才生效——
             # 0 行预览没有意义，退成默认 20 可以接受；但 0 有语义的参数（如 /predict 的 limit）不能照抄这写法。
-            # ⚠️ 另外注意 `_int()` 是在**这个 try 里面**求值的：传 rows=abc 时它抛的 InvalidInput（ValueError 子类）
-            #    会被下面的 `except Exception` 接住 → 返回 500 而不是 400，与其它接口"参数错→400"的口径不一致。
-            #    要改就得把 _int 挪到 try 之前（那是改行为，这里只记录现状）
+            # ⚠️ `_int()` 在这个 try 里求值：rows=abc 时它抛的 InvalidInput（ValueError 子类）会先被
+            #    下面的 `except InvalidInput` 接住 → 400；所以该分支必须排在 `except Exception` **之前**，
+            #    否则会被兜底分支吞掉变成 500，与其它接口"参数错→400"的口径不一致。
             data = tabular.preview(path, rows=_int(request.args.get("rows"), 20, "rows") or 20,
                                    sheet=request.args.get("sheet"), column=request.args.get("column"))
+        except InvalidInput as exc:
+            return {"error": str(exc)}, 400
         except Exception as exc:
             # 文件损坏/加密/列名对不上/不是数值列……统一算"这份表格读不出来"：500 但带上异常类型，便于定位
             return {"error": f"{type(exc).__name__}: {exc}"}, 500
@@ -575,9 +577,12 @@ class TrainingList(Resource):
         #    对"最近 N 条"列表接口来说 0 条本来没意义，退成默认值与用户意图一致，所以这里可以接受；
         #    但同样的写法搬到 /predict 的 limit 上就是 bug（0 有语义），那边刻意拆成两步
         #    （`limit = _int(...)` 再 `if limit is None: limit = 1`）。两处写法不一致是**故意的**，别"统一风格"
-        # ⚠️ 还有一点：`_int()` 在 try 之外求值，且 InvalidInput 是 ValueError 子类、项目里没有全局处理器，
-        #    所以 ?limit=abc 会抛出未捕获异常 → 500，而不是参数错应有的 400（要改就得挪进 try，属于改行为）
-        limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
+        # ⚠️ 这里额外包了 try：`_int()` 转不动时会抛 InvalidInput（ValueError 子类），而项目里没有
+        #    全局异常处理器，不接住就会变成 500。?limit=abc 属于参数错，应当明确回 400。
+        try:
+            limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
+        except InvalidInput as exc:
+            return {"error": str(exc)}, 400
         # ⚠️ limit 最终由 db.py 用 f-string 拼进 `LIMIT {int(limit)}`：安全全靠 API 层保证它是"整数且 ≤200"，
         #    db 那边的 int() 只是最后一道兜底（拼接 SQL 的写法本身不该再扩散）
         try:
@@ -695,8 +700,12 @@ class InferenceTaskList(Resource):
         # 与 /trainings 完全同构：_int 归一 + min(...,200) 夹上限，避免一次拉回整张 InferenceTasks 表
         # ⚠️ `or 20` 的 falsy 语义同上（limit=0 会被换成 20）；这个写法在 /predict 里是致命的，
         #    在这里只是"0 条没意义"，所以没有拆开写——看到"两处风格不一致"别顺手统一
-        # ⚠️ 同样地，`_int()` 不在 try 内，?limit=abc 会变成 500 而不是 400（项目没有全局 InvalidInput 处理器）
-        limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
+        # ⚠️ 与 /trainings 同理：`_int()` 转不动会抛 InvalidInput，本模块没有全局处理器，
+        #    接住后回 400，别让 ?limit=abc 退化成 500。
+        try:
+            limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
+        except InvalidInput as exc:
+            return {"error": str(exc)}, 400
         try:
             return {"tasks": database.recent_inference_tasks(limit), "dialect": database.dialect}
         except DBError as exc:

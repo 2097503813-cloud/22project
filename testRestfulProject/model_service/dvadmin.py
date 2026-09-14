@@ -159,21 +159,6 @@ def build_blueprint() -> Blueprint:
         return _ok({"url": f"/media/uploads/{stored}", "name": item.filename,
                     "file_name": stored, "size": (target_dir / stored).stat().st_size})
 
-    @bp.get("/media/<path:relpath>")
-    def uploaded_media(relpath):
-        """上传文件的静态访问入口（头像的 <img src> 指向这里）。
-
-        ⚠️ 同一条 URL 在本文件里挂了两份（这里一份、`register_dvadmin()` 里在 app 上又一份），
-        两份实现完全一致所以不会冲突；但真正被强调为"必须在 app 上注册"的是后者
-        （见那里的说明：blueprint 带 url_prefix 会变成 /api/media/...）。改这里时别只改一处。
-        """
-        from flask import send_from_directory
-
-        from .config import config
-        # 挂 data/ 而不是 data/uploads/：上传返回的是 /media/uploads/<文件>，
-        # 若把 uploads 目录本身挂在 /media 下，就会去找 uploads/uploads/<文件> → 404（头像破图）
-        return send_from_directory(config.upload_dir.parent, relpath)
-
     @bp.get("/api/system/menu/web_router/")
     def web_router():
         """动态菜单：后端控制路由的入口。"""
@@ -282,6 +267,9 @@ def register_dvadmin(app) -> None:
         ⚠️ 注册在 **app** 而不是 blueprint 上：blueprint 可能带 url_prefix，
         挂上去会变成 /api/media/... ，而前端拿到的相对地址是 /media/...（拼 VITE_API_URL 后
         仍是 /media/...），对不上就是头像 404 破图。URL 是前端写死的，所以路由也得钉死。
+        ⚠️ 所以本轮把 blueprint 里那份**完全相同的** `/media/<path:relpath>` 删掉了（原先同一 URL
+        注册了两份）：留着它不仅冗余，一旦 build_blueprint 哪天被带上 url_prefix，就会多出一条
+        /api/media/... 的幽灵规则，正是"头像破图"的成因。现在全局只此一处。
         """
         from flask import send_from_directory
 

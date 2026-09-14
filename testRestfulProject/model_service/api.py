@@ -620,8 +620,19 @@ class InferenceTaskDetail(Resource):
         return task
 
 
+# ------------------------------------------------------------ 模型名的"三套写法"
+# 同一个模型在不同地方有三个名字，写错一个就会"找不到模型"或"建出重复行"：
+#     1dcnn   ← 服务内部键（MODEL_META / _TRAINERS / 前端下拉的 value）
+#     1DCNN   ← Models 表里的 ModelName（给人看、也写进 SQL 的正式名）
+#     1dcnn   ← data/models/ 下的产物目录名（磁盘只认这个）
+# 下面三个函数就是三套写法之间的换算器：凡是要"拿用户输入去查东西"，先过这里。
+
 def _db_model_name(raw: str) -> str:
-    """CRUD 场景允许任意**已登记**的模型名（新登记的不在 ALIASES 里）；简称照旧规范化。"""
+    """任意写法 → **Models 表里的正式名**（1dcnn / 1DCNN / cnn / 算法模型1 → 1DCNN）。
+
+    `normalize_model` 只认别名表里那三个内置模型；上传进来的模型名不在表里，
+    它会抛 ValueError，这时**原样返回** —— CRUD 场景本来就允许操作任意已登记的模型名。
+    """
     from .training import db_model_name
     try:
         return db_model_name(normalize_model(raw))
@@ -630,13 +641,21 @@ def _db_model_name(raw: str) -> str:
 
 
 def _artifact_key(raw: str) -> str:
-    """把任意写法（1DCNN / 1dcnn / 上传的模型名）解析成 data/models 下的产物目录名。"""
+    """任意写法 → **产物目录名**（1DCNN → 1dcnn）。
+
+    先换成正式名，再在 MODEL_META 里反查内部键；查不到（上传的模型）就退化成小写原名。
+    注意返回的是**小写**键：磁盘目录就是小写，别拿它去写 Models 表。
+    """
     name = _db_model_name(raw)
     return next((k for k, v in MODEL_META.items() if v["db_name"].lower() == name.lower()), name.lower())
 
 
 def _safe_model_name(name: str) -> str:
-    """模型名的磁盘安全形式（与 /models/upload 里的处理保持一致）。"""
+    """模型名 → **磁盘安全形式**（与 `/models/upload` 的处理保持一致）。
+
+    非法字符**直接拒绝**而不是替换：改名是有副作用的动作，静默把 `a/b` 变成 `a_b`
+    会让用户以为改成功了。允许中英文、数字、下划线、点、横线。
+    """
     safe = re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", name).strip("._")
     if not safe:
         raise InvalidInput("模型名不合法（不能只有符号）")

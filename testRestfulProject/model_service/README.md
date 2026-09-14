@@ -25,7 +25,7 @@ Web服务器 ─▶ flask_restful 接口(Web访问) ─┬─▶ 算法模型1(1
 | GET | `/models` | 落盘产物 + 库表登记的模型清单 |
 | POST | `/models` | 登记一个模型（只写 `Models` 表，不训练、不落产物） |
 | POST | `/models/upload` | 上传模型（文件夹或多个文件）→ 探测 → 落盘 → 登记 |
-| GET | `/models/<name>` | 产物 meta.json 全文；`DELETE ?version=vN` 删除该版本（危险） |
+| GET | `/models/<name>` | 产物 meta.json 全文；`DELETE ?scope=artifact` 删除磁盘产物（危险，整份删掉、不可恢复） |
 | GET | `/models/<name>/references` | 该模型被哪些表引用了多少行（删之前的体检） |
 | GET | `/models/<name>/overview` | 模型档案（登记 + 产物参数 + 最近训练 + 引用统计） |
 | GET | `/datasets` | 数据集体检（内置 .mat + `data/datasets` 下上传的表格数据集） |
@@ -69,16 +69,23 @@ adtk 另有：`detector`（默认 `PcaAD`）、`k`（默认 4）、`c`（默认 
 `feature_mode`（`stats` 10 维统计特征 / `raw` 784 点原始幅值）、`sampling_rate`（默认 48000）、
 `threshold_quantile`（默认 0.995）、`factor`（默认 1.0）、`baseline_file`（默认 `normal_0_97.mat`，
 **只能是文件名**）、`max_points`（默认 40 万点，超出部分截断）。
-`training._train_adtk` 会读上面每一个键，可对照 `data/models/adtk/v2/meta.json` 的 `params`。
+`training._train_adtk` 会读上面每一个键，可对照 `data/models/adtk/meta.json` 的 `params`。
 
 ## 二、产物约定（流程图里的「Pxl模型」）
 
 ```
-data/models/<模型名>/v1/model.keras | model.h5 | model.pt | detector.pkl
-                       v1/scaler.npz     ← 训练期标准化参数（推理必须复用）
-                       v1/meta.json      ← 输入长度、类别表、指标、超参、数据集指纹
+data/models/<模型名>/model.keras | model.h5 | model.pt | detector.pkl
+                    scaler.npz     ← 训练期标准化参数（推理必须复用）
+                    meta.json      ← 输入长度、类别表、指标、超参、数据集指纹
 data/logs/train-<模型>-<时间>.log          ← 训练全过程日志
 ```
+
+**一个模型只有一份产物，没有版本号**：重新训练 / 同名再上传 = **直接替换**这一份。
+落盘先写 `.staging-<时间戳>/` 暂存目录，写完整了才换上去；中途失败只删暂存，旧产物原封不动
+（`registry.begin_artifact()` / `commit_artifact()` / `abort_artifact()`）。
+旧的多版本目录（`data/models/<名>/` 下原来那一层版本子目录）已由 `archive_legacy_versions()`
+一次性搬到 `data/archive/model_versions/<名>/` 归档保留（按旧版本号分子目录）—— 归档位置在
+`data/models` **之外**，免得它自己被当成一个模型列出来。
 
 `meta.json` 里**必须**带类别表（`labels`）：否则模型文件本身无法解释 0..9 对应哪种故障。
 
@@ -94,11 +101,11 @@ adtk 的时序图），**进程一退图就没了，也拿不进接口**。现�
 用 matplotlib 的 **Agg 后端 + `savefig`** 落盘：
 
 ```
-data/figures/<模型>/<版本>/training_curves.png        准确率/损失（训练集 vs 验证集）
-                        /confusion_matrix.png         混淆矩阵（带计数标注）
-                        /per_class_metrics.png        每类 精确率/召回率/F1
-                        /predict-<时间戳>/prediction_distribution.png   本次推理的预测分布
-                                        /predicted_windows.png        窗口原始信号 + 预测标签
+data/figures/<模型>/training_curves.png        准确率/损失（训练集 vs 验证集）
+                   /confusion_matrix.png         混淆矩阵（带计数标注）
+                   /per_class_metrics.png        每类 精确率/召回率/F1
+                   /predict-<时间戳>/prediction_distribution.png   本次推理的预测分布
+                                   /predicted_windows.png        窗口原始信号 + 预测标签
 ```
 
 - 训练完成自动出 3 张，每次 `/predict` 自动出 2 张；响应里带 `figures[]`（含可直接打开的 `url`）
@@ -203,11 +210,11 @@ data/figures/<模型>/<版本>/training_curves.png        准确率/损失（训
    里的一个点，而老代码喂的是「采样点 × 1 列」，PCA 退化成 1 维、重构误差恒为 0，只剩 IQR 在噪声上乱响。
    改成「行 = 窗口」（窗口 × 统计特征）之后，**实测 AUC = 1.0000，正常文件 0/20 判异常、
    4 个故障文件 19~20/20 判异常**，阈值另用留出集（未参与拟合的那 30% 窗口）标定，
-   `baseline_false_positive_rate` 才有意义。当前产物 `data/models/adtk/v2` 就是新格式。
+   `baseline_false_positive_rate` 才有意义。当前产物 `data/models/adtk/`（`detector.pkl` + `meta.json`）就是新格式。
    （另：老格式产物已**不再支持**，推理侧遇到会直接报错，不会静默按错误阈值判"正常/异常"。）
 2. **`/train` 是同步阻塞的**，没有任务队列；开发服务器开了 `threaded=True`，
    但一条训练请求会占住一个线程（实测 1DCNN 10 epoch 约 15 秒，cwt_cnn 50 epoch 约 40 秒）。
-3. **`model_service` 不写模型版本号**（只有自增的 `v1/v2`），`ModelDeployments` 表和
+3. **`model_service` 不再有模型版本号**（一个模型只有一份产物，重训/重传直接替换），`ModelDeployments` 表和
    「边缘设备 → 机床」那条支线仍未接入，`EdgeDevices` 表还是空的。
 4. **环境相关的坑**（已规避，换机器可能不再复现）：
    - 某些受限环境禁止在 `mkdtemp` 建的目录里写文件 → Keras 原生 `.keras`（zip，先写临时文件再改名）

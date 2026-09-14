@@ -307,6 +307,8 @@ def _write_db(model_name: str, artifact, payload: dict, input_info: dict, predic
     """InferenceTasks → InferenceResults（+ ModelInvocations）。"""
     from .training import db_model_name
     try:
+        # 外键锚点：InferenceTasks.TrainingID 是 NOT NULL，所以"这次推理基于哪一次训练"
+        # 必须能查到 —— 拿不到成功训练记录就不写库并明确回报原因，绝不伪造一个 ID。
         training_row, anchor = _resolve_anchor(model_name, training_id)
         if anchor is None:
             return {"written": False, "dialect": database.dialect,
@@ -375,23 +377,39 @@ def predict(model: str | None = None, samples=None, path: str | None = None, ind
             limit: int = 1, version: str | None = None, training_id: int | None = None,
             top_k: int = 3, write_db: bool = True, client_ip: str | None = None,
             column: str | None = None, sheet: str | int | None = None) -> dict:
-    """推理入口。返回结构化结果 + 落库回执。"""
+    """推理入口：解析模型 → 取产物 → 切窗校验 → 分派引擎 → 落库，返回结果 + 落库回执。
+
+    失败语义：输入非法抛 InvalidInput(→400)、产物缺失抛 FileNotFoundError(→409)，
+    落库失败**不抛异常**而是在返回值里给 `db.written=False` + 原因（推理本身是成功的）。
+    """
     from .training import normalize_model
     try:
         name = normalize_model(model)
     except ValueError:
-        # 上传进来的模型名不在别名表里（1dcnn/cwt_cnn/adtk），按原名解析产物目录
+        # 别名表里没有（1dcnn/cwt_cnn/adtk 之外的）名字 = 上传进来的模型，按原名当产物目录名用。
+        # 这一步**不做白名单**是有意的：上传的模型必须能被推理；目录安全由 registry 的
+        # `_model_root()` 净化保证（拒绝路径分隔符与 ".."），不在这里重复拦。
         name = (model or "").strip()
         if not name:
             raise InvalidInput("必须提供 model")
     started = time.time()
+    # 取产物：version 为空 = 取最新版。目录/权重缺失会抛 FileNotFoundError，
+    # 由 api 层映射成 409 + "先调 /train"，而不是 500。
     artifact = load_artifact(name, version)
+    # 切窗长度以产物里的 input_len 为准（训练多长、推理就必须多长）；
+    # 早期上传的产物可能没写这个字段，退回 784 —— 下面 reshape 用的是同一个值，两处必须一致。
     input_len = int(artifact.meta.get("input_len") or 784)
 
+    # 两种输入统一成 (n, input_len) 矩阵：samples（内联数组）优先，否则按 path 读文件再切窗
     matrix, input_info = _build_matrix(samples, path, input_len, int(index), int(limit),
                                        column=column, sheet=sheet)
+    # 校验：列数必须等于 input_len；出现 NaN/Inf 一律拒收（否则会在网络里传播成 nan 结果）
     _validate(matrix, input_len)
 
+    # 按**产物里记录的 framework** 分派引擎，而不是按模型名猜：
+    #   tensorflow-keras → model.h5/.keras + scaler.npz → 类别 + 置信度 + top_k
+    #   pytorch          → model.pt        + scaler.npz → 同上
+    #   adtk             → detector.pkl（无监督）       → 是否异常 + 异常分数
     handler = _DISPATCH.get(artifact.framework)
     if handler is None:
         raise InvalidInput(f"产物框架 {artifact.framework} 暂不支持推理")

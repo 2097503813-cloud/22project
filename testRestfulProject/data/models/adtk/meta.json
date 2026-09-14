@@ -51,10 +51,10 @@
   },
   "confusion": null,
   "scaler_file": null,
-  "trained_at": "2026-09-15T01:39:24",
-  "log_file": "D:\\22project\\testRestfulProject\\data\\logs\\train-adtk-20260915-013924.log",
+  "trained_at": "2026-09-15T01:44:09",
+  "log_file": "D:\\22project\\testRestfulProject\\data\\logs\\train-adtk-20260915-014409.log",
   "trusted": true,
   "provenance": "train",
   "weights_file": "detector.pkl",
-  "created_at": "2026-09-15T01:39:24"
+  "created_at": "2026-09-15T01:44:09"
 }

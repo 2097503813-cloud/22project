@@ -335,12 +335,13 @@
 					<el-table-column prop="ModelName" label="模型" width="110" />
 					<el-table-column prop="DatasetName" label="数据集" width="160" />
 					<el-table-column prop="TrainName" label="训练名" min-width="200" />
-					<!-- 轮次/准确率/loss 合并成一列：Epochs 是无监督模型不存在的常数，准确率与 loss 又是一对
-					     必须成对看的指标，三列并成一列省掉两格空白（无监督的 Accuracy/Loss 后端恒为 NULL） -->
+					<!-- 轮次/准确率/loss 合并成一列：准确率与 loss 是一对必须成对看的指标，挤在一列省两格宽度；
+					     轮次不另开列，改在指标下方用小字（无监督模型没有"轮次"这个概念，显示「—」） -->
 					<el-table-column label="测试指标" min-width="170">
 						<template #default="{ row }">
 							<span v-if="isAnomalyTraining(row)" class="hint">无监督·无准确率</span>
 							<span v-else>{{ fmt(row.Accuracy) }} / {{ fmt(row.Loss) }}</span>
+							<div class="hint">轮次 {{ isAnomalyTraining(row) ? '—' : (row.Epochs ?? '—') }}</div>
 						</template>
 					</el-table-column>
 					<el-table-column label="状态" width="90">
@@ -610,9 +611,13 @@ const isAnomalyResult = (): boolean => {
 	const stats = trainResult.value?.dataset_stats || {};
 	return metrics.note != null || stats.detector != null || stats.baseline_source != null;
 };
-/** 训练记录行是不是异常检测：无监督的 Accuracy/Loss 后端恒为 NULL，或模型名就是 adtk */
+/** 训练记录行是不是异常检测（无监督）。
+ *  ⚠️ 「Accuracy/Loss 为 NULL」这个判据必须再叠一层 Status==='成功'：**失败**的训练行指标同样是 NULL，
+ *  那是"这次没跑出指标"，跟"这个模型压根没有准确率"是两回事，混在一起会把失败行也写成「无监督·无准确率」。
+ *  模型名 adtk 单独判：无监督路线本身就没有准确率，与这一次成功与否无关。 */
 const isAnomalyTraining = (row: any): boolean =>
-	(row?.Accuracy == null && row?.Loss == null) || String(row?.ModelName || '').toLowerCase() === 'adtk';
+	String(row?.ModelName || '').toLowerCase() === 'adtk'
+	|| (row?.Status === '成功' && row?.Accuracy == null && row?.Loss == null);
 const labelRows = computed(() =>
 	((overview.value?.labels as string[]) || []).map((label, id) => ({ id, label }))
 );
@@ -829,6 +834,9 @@ onMounted(async () => {
 <style scoped lang="scss">
 .mb { margin-bottom: 16px; }
 .mt { margin-top: 16px; }
+/* 本页原来漏了这条定义（其他 4 个 platform 页面各自的 scoped style 里都有一份），
+   于是本页十几处 class="hint" 的说明文字一直按正文渲染、跟主内容抢注意力；照抄其余页面的写法补齐 */
+.hint { font-size: 12px; color: var(--el-text-color-secondary); }
 .empty { color: var(--el-text-color-secondary); text-align: center; padding: 24px 0; }
 .pre { max-height: 320px; overflow: auto; background: #141413; color: #ede9e0; padding: 12px; border-radius: 6px; font-size: 12px; }
 .figs { display: flex; flex-wrap: wrap; gap: 12px; }

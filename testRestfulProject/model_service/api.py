@@ -116,6 +116,7 @@ def probe_weight(filename: str, blob: bytes) -> dict:
     suffix = Path(filename).suffix.lower()
     framework = WEIGHT_SUFFIXES.get(suffix)
     result = {"ok": False, "framework": framework, "reason": "", "input_len": None, "num_classes": None}
+    # 第一关：扩展名。连后缀都不在支持列表里，就没必要打开文件了
     if framework is None:
         result["reason"] = f"扩展名 {suffix or '(无)'} 不是模型权重（支持 .h5/.keras/.pt/.pth/.pkl/.pickle）"
         return result
@@ -124,18 +125,23 @@ def probe_weight(filename: str, blob: bytes) -> dict:
         return result
 
     try:
+        # ---------------- .h5 / .keras：两种 Keras 存档，用"文件头是不是 PK(zip)"区分 ----------------
         if suffix in (".h5", ".keras"):
-            if blob[:2] == b"PK":                          # Keras 3 的 .keras 是 zip
+            if blob[:2] == b"PK":                          # Keras 3 的 .keras 是一个 zip 包
                 with zipfile.ZipFile(io.BytesIO(blob)) as zf:
                     names = zf.namelist()
+                    # 必须含 config.json（网络结构）或 metadata.json，否则就是个普通 zip
                     if "config.json" not in names and "metadata.json" not in names:
                         result["reason"] = f"压缩包里没有 config.json/metadata.json，不像 Keras 模型（含 {names[:5]}）"
                         return result
                     config = json.loads(zf.read("config.json").decode("utf-8"))
-                input_len, units = _keras_shapes(config)
+                input_len, units = _keras_shapes(config)   # 从结构里挖输入长度与最后一层 units
                 result.update(ok=True, input_len=input_len, num_classes=units,
                               reason=f"Keras 3 存档（zip，input_len={input_len}，类别数={units}）")
                 return result
+            # 不是 zip → 按 HDF5 处理（Keras 2 的 .h5）。
+            # 关键：光能打开还不够，必须有 model_weights 组或 model_config 属性 ——
+            # 否则随便一个 HDF5 数据文件都会被误判成"模型"
             import h5py
             with h5py.File(io.BytesIO(blob), "r") as handle:
                 keys = list(handle.keys())
@@ -150,6 +156,7 @@ def probe_weight(filename: str, blob: bytes) -> dict:
                           reason=f"Keras HDF5（顶层 {keys[:5]}，input_len={input_len}，类别数={units}）")
             return result
 
+        # ---------------- .pt / .pth：torch>=1.6 存的是 zip 容器，里面必有 data.pkl ----------------
         if suffix in (".pt", ".pth"):
             if blob[:2] != b"PK":
                 result["reason"] = (f"不是 PyTorch 检查点（torch>=1.6 的 .pt 是 zip，应以 PK 开头；"
@@ -166,8 +173,11 @@ def probe_weight(filename: str, blob: bytes) -> dict:
                 result.update(ok=True, reason=f"PyTorch 检查点（本机无 torch，跳过参数解析：{exc}）")
                 return result
             try:
+                # weights_only=True：只反序列化张量，不执行 pickle 里的任意对象
                 obj = torch.load(io.BytesIO(blob), map_location="cpu", weights_only=True)
-            except Exception as exc:                       # 存成完整模型对象时解析不了，但仍按权重接受
+            except Exception as exc:
+                # 存成"完整模型对象"时 weights_only 会拒绝，但那**确实是模型**：
+                # 宁可少读一个类别数，也不要误判成"不是模型"
                 result.update(ok=True, reason=f"PyTorch 检查点（未解析参数：{type(exc).__name__}）")
                 return result
             state = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
@@ -175,18 +185,24 @@ def probe_weight(filename: str, blob: bytes) -> dict:
             if not shapes:
                 result["reason"] = "torch 文件里没有张量参数，不像模型权重"
                 return result
+            # 猜类别数：倒着找第一个"像分类头"的二维权重（fc/classifier/linear/head…），
+            # 它的第 0 维 = 输出类别数；找不到就退而取最后一个二维权重
             head = next((s for k, s in reversed(shapes) if len(s) == 2 and _HEAD_LAYER_RE.search(k)), None)
             head = head or next((s for _, s in reversed(shapes) if len(s) == 2), None)
             result.update(ok=True, num_classes=int(head[0]) if head else None,
                           reason=f"PyTorch state_dict（{len(shapes)} 个张量，类别数={int(head[0]) if head else None}）")
             return result
 
-        if blob[:1] != b"\x80":                            # pickle 协议 2+ 都以 0x80 开头
+        # ---------------- .pkl：只验 pickle 魔数，**绝不反序列化** ----------------
+        # 反序列化 pickle = 执行文件里的任意代码，而这是"上传"来的文件；
+        # 判断"是不是 pickle"只需要看头 1 个字节（协议 2+ 都以 0x80 开头）就够了。
+        if blob[:1] != b"\x80":
             result["reason"] = f"不是 pickle 文件（.pkl 应以 0x80 开头，实际 {blob[:2]!r}）"
             return result
         result.update(ok=True, reason="pickle 序列化对象（adtk 检测器/传统模型；为安全起见不做反序列化校验）")
         return result
-    except Exception as exc:                               # 坏文件、半截文件都会走到这里
+    except Exception as exc:
+        # 坏文件、半截文件、权限问题都会落到这里。reason 会被前端逐条展示，所以要说人话。
         result["reason"] = f"读取失败，不像有效模型文件：{type(exc).__name__}: {exc}"
         return result
 

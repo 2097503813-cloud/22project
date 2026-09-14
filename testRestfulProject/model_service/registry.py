@@ -30,14 +30,18 @@ _VERSION_RE = re.compile(r"^v(\d+)$")
 
 @dataclass
 class Artifact:
-    """\u4e00\u4e2a\u5df2\u843d\u76d8\u7684\u6a21\u578b\u4ea7\u7269\uff1a\u5b9a\u4f4d\u4fe1\u606f\uff08\u76ee\u5f55/\u6743\u91cd\u6587\u4ef6\uff09+ \u81ea\u89e3\u91ca\u4fe1\u606f\uff08\u6846\u67b6/meta\uff09\u3002"""
+    """一个已落盘的模型产物：**定位信息**（目录 / 权重文件）+ **自解释信息**（框架 / meta）。
 
-    name: str
-    version: str
-    directory: Path
-    weights: Path
-    framework: str
-    meta: dict = field(default_factory=dict)
+    它不是"模型对象"，只是磁盘上那堆文件的**句柄**——推理时按 `weights` 加载、
+    按 `framework` 决定用哪个引擎、按 `meta["input_len"]` 决定切多长的窗。
+    """
+
+    name: str                 # 模型名（同时也是 data/models 下的目录名，如 1dcnn）
+    version: str              # 版本目录名，形如 v1 / v2
+    directory: Path           # 版本目录的绝对路径 data/models/<名>/<版本>/
+    weights: Path             # 权重文件绝对路径（model.h5 / model.pt / detector.pkl）
+    framework: str            # tensorflow-keras / pytorch / adtk —— 推理分派靠它
+    meta: dict = field(default_factory=dict)   # meta.json 的完整内容（见模块头）
 
     @property
     def meta_path(self) -> Path:
@@ -45,7 +49,11 @@ class Artifact:
         return self.directory / "meta.json"
 
     def to_dict(self) -> dict:
-        """\u6311\u51fa\u7ed9\u63a5\u53e3/\u524d\u7aef\u7528\u7684\u5b57\u6bb5\uff08meta \u91cc\u7684\u539f\u59cb dict \u592a\u5927\uff0c\u4e0d\u900f\u4f20\uff09\u3002"""
+        """挑出给接口/前端用的字段（meta 里的原始 dict 太大，不透传）。
+
+        只挑 12 个字段是有意为之：`/models` 会一次列出所有模型的全部版本，
+        把整份 meta（含 history 曲线、classification_report 文本）塞进去会让响应膨胀几十倍。
+        """
         return {
             "model": self.name,
             "version": self.version,
@@ -81,13 +89,18 @@ def _model_root(name: str) -> Path:
 
 
 def next_version_dir(name: str) -> Path:
-    """取下一个可用版本目录，形如 data/models/1dcnn/v2。"""
+    """算出并**创建**下一个版本目录，形如 data/models/1dcnn/v2。
+
+    编号规则：取现有 vN 里最大的 N 再加 1（删掉 v1 后不会复用编号，避免"同名不同物"）。
+    这里 `mkdir(exist_ok=False)` 是并发的安全网：两个训练请求同时进来时，
+    后一个会撞 FileExistsError 而不是写进同一个目录把产物搅坏。
+    """
     root = _model_root(name)
     root.mkdir(parents=True, exist_ok=True)
     used = [int(m.group(1)) for p in root.iterdir() if p.is_dir() and (m := _VERSION_RE.match(p.name))]
     version = f"v{max(used, default=0) + 1}"
     target = root / version
-    target.mkdir(parents=True, exist_ok=False)
+    target.mkdir(parents=True, exist_ok=False)   # 目录已存在就抛错，不做静默覆盖
     return target
 
 
@@ -122,14 +135,21 @@ def _find_weights(directory: Path) -> Path | None:
 
 
 def save_artifact(name: str, framework: str, saver, meta: dict, keep_previous: bool = True) -> Artifact:
-    """落盘一个模型产物。
+    """落盘一个模型产物，返回可用的 Artifact。
 
-    saver: 可调用对象，签名 saver(target_dir: Path) -> Path（返回权重文件路径）。
-    失败时会把刚建的版本目录清掉，不留半个产物。
+    saver: 调用方提供的回调，签名 `saver(target_dir: Path) -> Path`，负责把权重写进
+    刚建好的版本目录并返回权重文件路径（各框架的存法不同，所以由 trainer 自己决定）。
+
+    整个落盘是一个"要么全有要么全无"的单元：中途任何异常都会把刚建的版本目录
+    **整个删掉**（`rmtree`），避免留下"只有 scaler 没有权重"的半成品被后续查找误命中。
     """
     target = next_version_dir(name)
     try:
+        # ① 先让 saver 写权重（Keras 的 .keras / PyTorch 的 .pt / adtk 的 pickle 都在这步）
         weights = saver(target)
+        # ② meta 是产物的"说明书"：模型名/版本/框架 + 权重文件名，再合并 trainer 给的业务字段
+        #    （input_len、labels、metrics、params、dataset 指纹…）。权重文件名必须记下来，
+        #    否则后面只能靠固定顺序猜哪个文件是权重（踩过 .keras 半成品被误命中的坑）。
         meta = {
             **meta,
             "model": name,
@@ -141,11 +161,11 @@ def save_artifact(name: str, framework: str, saver, meta: dict, keep_previous: b
         (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         artifact = Artifact(name=name, version=target.name, directory=target,
                             weights=Path(weights), framework=framework, meta=meta)
-        if not keep_previous:
+        if not keep_previous:            # 只要最新版时，顺手清掉历史版本（默认保留，便于对比）
             _prune_except(name, keep=target.name)
         return artifact
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(target, ignore_errors=True)   # 回滚：不留半个产物
         raise
 
 
@@ -157,7 +177,13 @@ def _prune_except(name: str, keep: str) -> None:
 
 
 def load_artifact(name: str, version: str | None = None) -> Artifact:
-    """按名字（可指定版本）取产物。version 为空时取最新。"""
+    """按名字取产物，`version` 为空时取**最新版**（推理默认走这里）。
+
+    抛错语义（上层据此回 404/409，不要吞）：
+      - 模型目录不存在 / 一个版本都没有 → FileNotFoundError("先调 /train")
+      - 指定版本不存在               → FileNotFoundError
+      - 版本目录在但找不到权重       → FileNotFoundError（半成品目录会走到这一支）
+    """
     root = _model_root(name)
     if not root.is_dir():
         raise FileNotFoundError(f"还没有任何 {name} 的模型产物，先调 /train")
@@ -166,6 +192,7 @@ def load_artifact(name: str, version: str | None = None) -> Artifact:
         if not directory.is_dir():
             raise FileNotFoundError(f"{name} 不存在版本 {version}")
     else:
+        # 版本目录按数字排序取最大者（不能按字符串排：v10 会排在 v2 前面）
         candidates = sorted([p for p in root.iterdir() if p.is_dir() and _VERSION_RE.match(p.name)],
                             key=lambda p: int(p.name[1:]))
         if not candidates:
@@ -176,6 +203,8 @@ def load_artifact(name: str, version: str | None = None) -> Artifact:
     if weights is None:
         raise FileNotFoundError(f"{directory} 里找不到权重文件")
     meta_path = directory / "meta.json"
+    # meta 缺失也放行（framework 退化成 unknown），让"权重存在但没有说明书"的产物还能被看到，
+    # 而不是在这里直接崩掉——真正需要 input_len/labels 的地方自己会报错。
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
     return Artifact(name=name, version=directory.name, directory=directory, weights=weights,
                     framework=meta.get("framework", "unknown"), meta=meta)

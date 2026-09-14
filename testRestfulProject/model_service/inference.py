@@ -65,12 +65,17 @@ def _read_signal(path: Path, column: str | None = None, sheet: str | int | None 
 
 def _windows_from_signal(signal: np.ndarray, input_len: int, start_index: int = 0,
                          limit: int = 1) -> np.ndarray:
-    """按窗口切出待推理样本，越界直接报错而不是补 NaN。"""
+    """按**固定步长 = input_len**（即不重叠）切出待推理窗口，越界直接报错而不是补 NaN。
+
+    与训练侧的差异（已知且有意保留）：训练按 `stride`（默认 150）**重叠**切窗、
+    编号语义是"第几个训练窗"；这里按 input_len 不重叠切，编号是"从第 index 个窗起取 limit 个"。
+    两侧窗口编号因此不能直接对齐，但对"看这段信号判成什么"这个用途没影响。
+    """
     windows = []
     for i in range(start_index, start_index + limit):
         begin = i * input_len
         end = begin + input_len
-        if end > signal.size:
+        if end > signal.size:          # 宁可报错也不补 NaN：NaN 会一路传进模型，输出全是 nan
             raise InvalidInput(
                 f"窗口 {i} 越界：需要信号长度 ≥ {end}，实际只有 {signal.size}。"
                 f"（这正是原管线补 NaN 的地方，服务侧选择拒绝）")
@@ -80,13 +85,18 @@ def _windows_from_signal(signal: np.ndarray, input_len: int, start_index: int = 
 
 def _build_matrix(samples, path, input_len: int, index: int, limit: int,
                   column: str | None = None, sheet: str | int | None = None) -> tuple[np.ndarray, dict]:
-    """把 samples / path 两种入参统一成 (n, input_len) 矩阵。"""
+    """把 samples / path 两种入参统一成 (n, input_len) 矩阵，并回带一份输入信息。
+
+    samples 优先（浏览器/脚本直接送数组的场景）；否则按 path 读文件：
+    路径先过 `_guard_path`（必须落在工作区内），再按后缀分流 .mat/.npy/表格。
+    回带的 `info` 会写进 InferenceTasks 的 ResultSummary，用于事后追溯"这次喂的是哪个文件"。
+    """
     info: dict = {"source": None}
     if samples is not None:
         arr = np.asarray(samples, dtype=float)
-        if arr.ndim == 1:
+        if arr.ndim == 1:              # 一维 = 单个样本，补一维当成 (1, n)
             arr = arr.reshape(1, -1)
-        if arr.ndim != 2:
+        if arr.ndim != 2:              # 三维及以上没有"每行一个样本"的语义，直接拒
             raise InvalidInput("samples 必须是二维数组（每行一个样本）或一维单样本")
         info["source"] = "inline_samples"
         return arr, info
@@ -102,15 +112,19 @@ def _build_matrix(samples, path, input_len: int, index: int, limit: int,
 
 
 def _validate(matrix: np.ndarray, input_len: int) -> None:
-    """形状与数值的双重校验：长度不符、含 NaN/Inf、空样本都直接拒收。"""
-    if matrix.shape[1] != input_len:
+    """形状与数值的双重校验：长度不符、含 NaN/Inf、空样本三种情况都直接拒收。
+
+    校验放在**标准化之前**，因为这几类问题都是输入侧的问题；
+    标准化本身也可能算出 inf（scale 里有 0），那种情况由调用方自行留意。
+    """
+    if matrix.shape[1] != input_len:   # 长度必须与训练时的 input_len 完全一致，多一个点都不行
         raise InvalidInput(f"每个样本长度必须是 {input_len}，收到 {matrix.shape[1]}")
     if not np.all(np.isfinite(matrix)):
         # 只报前 5 行坏样本的行号，避免几百行 NaN 把报错信息撑爆
         bad = np.where(~np.isfinite(matrix).all(axis=1))[0].tolist()[:5]
         raise InvalidInput(f"样本里存在 NaN/Inf（行号 {bad} ...），拒绝推理。"
                            f"这类样本通常来自数据切片越界后的 NaN 填充。")
-    if matrix.shape[0] == 0:
+    if matrix.shape[0] == 0:           # 切窗后一个都没剩（例如 index 超出范围）
         raise InvalidInput("没有可推理的样本")
 
 

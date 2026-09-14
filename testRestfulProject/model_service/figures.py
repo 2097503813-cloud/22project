@@ -5,7 +5,7 @@
   * 原有把图"表现出来"的地方只有 `plt.show()`（1DCNN.py 的准确率/损失曲线、
     cwt_cnn 的混淆矩阵、adtk 的时序图），进程退出图就没了，也没法在接口里返回；
   * 这里统一用 Agg 后端 + `savefig` 落盘，Flask 跑在无显示环境也能出图，
-    图放在 data/figures/<模型>/<版本>/ 下，可通过 GET /figures/<路径> 直接看。
+    图放在 data/figures/<模型>/ 下，可通过 GET /figures/<路径> 直接看。
 
 ⚠️ 为什么必须走**无头后端**（Agg，见 `_pyplot()`）：
    服务器上没有显示器。matplotlib 默认后端会去找显示服务并尝试弹窗，后果是
@@ -112,7 +112,7 @@ def _save(fig, path: Path) -> dict:
 
 
 # ------------------------------------------------------------------ 训练期出图
-def training_figures(model: str, version: str, meta: dict, extra: dict | None = None) -> dict:
+def training_figures(model: str, meta: dict, extra: dict | None = None) -> dict:
     """生成训练期三张图，返回 {"figures": [...], "dir": ..., "error": ...}
 
     契约：**本函数不抛异常**（整段 try），失败时把错误塞进 error 返回。
@@ -120,7 +120,7 @@ def training_figures(model: str, version: str, meta: dict, extra: dict | None = 
     ⚠️ 出图依赖字体、matplotlib、磁盘权限等一堆训练用不到的东西，不该让它们左右结论。
     """
     extra = extra or {}
-    target = FIG_DIR / model / version
+    target = FIG_DIR / model
     figures: list[dict] = []
     try:
         plt = _pyplot()
@@ -143,7 +143,7 @@ def training_figures(model: str, version: str, meta: dict, extra: dict | None = 
                 ax.set_xlabel("训练轮次")
                 ax.set_ylabel(title)
                 ax.legend()
-            fig.suptitle(f"{meta.get('model', model)} {version} · 训练曲线 "
+            fig.suptitle(f"{meta.get('model', model)} · 训练曲线 "
                          f"(epochs={len(list(epochs))})", fontsize=13)
             figures.append(_save(fig, target / "training_curves.png"))
 
@@ -160,7 +160,7 @@ def training_figures(model: str, version: str, meta: dict, extra: dict | None = 
             ax.set_yticks(range(len(short)), short, fontsize=8)
             ax.set_xlabel("预测类别")
             ax.set_ylabel("真实类别")
-            ax.set_title(f"{meta.get('model', model)} {version} · 混淆矩阵"
+            ax.set_title(f"{meta.get('model', model)} · 混淆矩阵"
                          f"（测试集 {int(mat.sum())} 个窗口，准确率 "
                          f"{metrics.get('test_accuracy')}）", fontsize=12)
             threshold = mat.max() / 2 if mat.size else 0
@@ -189,7 +189,7 @@ def training_figures(model: str, version: str, meta: dict, extra: dict | None = 
                 ax.set_xticks(x + width * (len(cols) - 1) / 2, short, rotation=45, ha="right", fontsize=8)
                 ax.set_ylim(0, 1.05)
                 ax.set_ylabel("得分")
-                ax.set_title(f"{meta.get('model', model)} {version} · 各类别精确率/召回率/F1")
+                ax.set_title(f"{meta.get('model', model)} · 各类别精确率/召回率/F1")
                 ax.legend()
                 figures.append(_save(fig, target / "per_class_metrics.png"))
 
@@ -200,14 +200,14 @@ def training_figures(model: str, version: str, meta: dict, extra: dict | None = 
 
 
 # ------------------------------------------------------------------ 推理期出图
-def inference_figures(model: str, version: str, payload: dict, matrix=None) -> dict:
+def inference_figures(model: str, payload: dict, matrix=None) -> dict:
     """生成推理期两张图：预测分布 + 预测窗口波形（最多 6 个窗口）。
 
     与训练期同样**不抛异常**，失败只写进 error（调用方记 `figures_error`）。
     落盘目录额外带 `predict-<时间戳>` 一层：同一份模型会被反复推理，
     每次都覆盖同名文件的话，历史留痕就没了。
     """
-    target = FIG_DIR / model / version / f"predict-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    target = FIG_DIR / model / f"predict-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     figures: list[dict] = []
     try:
         plt = _pyplot()
@@ -231,7 +231,7 @@ def inference_figures(model: str, version: str, payload: dict, matrix=None) -> d
             ax.bar_label(bars)
             ax.set_xticks(range(len(keys)), keys, rotation=30, ha="right", fontsize=9)
             ax.set_ylabel("窗口数")
-            ax.set_title(f"{model} {version} · 本次推理 {payload.get('count')} 个窗口的预测分布")
+            ax.set_title(f"{model} · 本次推理 {payload.get('count')} 个窗口的预测分布")
             figures.append(_save(fig, target / "prediction_distribution.png"))
 
         # ② 预测窗口波形
@@ -271,7 +271,7 @@ def inference_figures(model: str, version: str, payload: dict, matrix=None) -> d
                 ax.grid(alpha=0.2)
             for j in range(show, rows * cols):
                 axes[j // cols][j % cols].axis("off")
-            fig.suptitle(f"{model} {version} · 预测窗口原始信号（绿底=命中/正常，红底=未命中/异常）"
+            fig.suptitle(f"{model} · 预测窗口原始信号（绿底=命中/正常，红底=未命中/异常）"
                          f"\n{str(payload.get('input', {}).get('path') or '内联数组')}", fontsize=11)
             fig.tight_layout()
             figures.append(_save(fig, target / "predicted_windows.png"))

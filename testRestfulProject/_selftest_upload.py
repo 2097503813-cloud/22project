@@ -41,8 +41,8 @@ def resolve_reported_path(raw: str) -> Path:
     """把响应里回报的路径解析成真实路径。
 
     ⚠️ 不能直接 `Path(raw)` 相对当前目录拼：响应出口 api._install_path_mask 会把本机绝对路径
-    脱敏成"相对工作区"的写法（`D:\\22project\\testRestfulProject\\data\\models\\X\\v1`
-    → `testRestfulProject\\data\\models\\X\\v1`），于是在 testRestfulProject 目录下运行本脚本时
+    脱敏成"相对工作区"的写法（`D:\\22project\\testRestfulProject\\data\\models\\X`
+    → `testRestfulProject\\data\\models\\X`），于是在 testRestfulProject 目录下运行本脚本时
     会被拼成 testRestfulProject\\testRestfulProject\\data\\...，误报"落盘 meta.json 不存在"。
 
     口径与 inference._guard_path / api.Train.post 一致：**先按工作区根试、再按项目目录试**；
@@ -169,8 +169,8 @@ def main() -> int:
         check("产物目录已搬迁", rename.get("artifact_dir_moved") is True, str(rename))
         check("老目录不存在了", not old_dir.exists())
         new_dir = CONF.model_dir / "SELFTEST-H5-RENAMED"
-        check("新目录里有 meta.json", (new_dir / "v1" / "meta.json").is_file(), str(new_dir))
-        meta = json.loads((new_dir / "v1" / "meta.json").read_text(encoding="utf-8"))
+        check("新目录里有 meta.json", (new_dir / "meta.json").is_file(), str(new_dir))
+        meta = json.loads((new_dir / "meta.json").read_text(encoding="utf-8"))
         check("meta.json 的 model 字段已改", meta.get("model") == "SELFTEST-H5-RENAMED", str(meta.get("model")))
         names = [r["ModelName"] for r in database.models_in_db()]
         check("Models 表里旧名字没了、新名字在", old not in names and "SELFTEST-H5-RENAMED" in names)

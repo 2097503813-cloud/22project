@@ -211,7 +211,7 @@ def _predict_adtk(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
     # 本机训练出来的产物 meta 里有 trusted=True；上传的一律 trusted=False。
     if artifact.meta.get("trusted", True) is False and not os.environ.get("MODEL_ALLOW_UNTRUSTED_PICKLE"):
         raise InvalidInput(
-            f"产物 {artifact.meta.get('model') or artifact.version} 是**上传**的（不可信来源），"
+            f"产物 {artifact.meta.get('model') or artifact.name} 是**上传**的（不可信来源），"
             f"出于安全考虑不会反序列化它的 {Path(artifact.weights).name}；"
             f"要放行请设置环境变量 MODEL_ALLOW_UNTRUSTED_PICKLE=1 后重启服务")
 
@@ -362,7 +362,7 @@ def _write_db(model_name: str, artifact, payload: dict, input_info: dict, predic
             "task_name": f"predict-{model_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
             "task_type": artifact.meta.get("task", "classification"), "status": "成功",
             "inference_params": request_params,
-            "result_summary": {"样本数": payload["count"], "模型版本": artifact.version,
+            "result_summary": {"样本数": payload["count"], "模型": artifact.name,
                                "输入来源": input_info.get("source"), "锚点训练": anchor,
                                "预测分布": payload["summary"]},
             "model_id": model_id, "input_path": source_path, "output_path": output_path, "progress": 100,
@@ -386,7 +386,7 @@ def _write_db(model_name: str, artifact, payload: dict, input_info: dict, predic
 
 # ------------------------------------------------------------------ 统一入口
 def predict(model: str | None = None, samples=None, path: str | None = None, index: int = 0,
-            limit: int = 1, version: str | None = None, training_id: int | None = None,
+            limit: int = 1, training_id: int | None = None,
             top_k: int = 3, write_db: bool = True, client_ip: str | None = None,
             column: str | None = None, sheet: str | int | None = None) -> dict:
     """推理入口：解析模型 → 取产物 → 切窗校验 → 分派引擎 → 落库，返回结果 + 落库回执。
@@ -400,14 +400,14 @@ def predict(model: str | None = None, samples=None, path: str | None = None, ind
     except ValueError:
         # 别名表里没有（1dcnn/cwt_cnn/adtk 之外的）名字 = 上传进来的模型，按原名当产物目录名用。
         # 这一步**不做白名单**是有意的：上传的模型必须能被推理；目录安全由 registry 的
-        # `_model_root()` 净化保证（拒绝路径分隔符与 ".."），不在这里重复拦。
+        # `_model_dir()` 净化保证（拒绝路径分隔符与 ".."），不在这里重复拦。
         name = (model or "").strip()
         if not name:
             raise InvalidInput("必须提供 model")
     started = time.time()
-    # 取产物：version 为空 = 取最新版。目录/权重缺失会抛 FileNotFoundError，
+    # 取产物：一个模型只有一个产物，没有版本可选。目录/权重缺失会抛 FileNotFoundError，
     # 由 api 层映射成 409 + "先调 /train"，而不是 500。
-    artifact = load_artifact(name, version)
+    artifact = load_artifact(name)
     # 切窗长度以产物里的 input_len 为准（训练多长、推理就必须多长）；
     # 早期上传的产物可能没写这个字段，退回 784 —— 下面 reshape 用的是同一个值，两处必须一致。
     input_len = int(artifact.meta.get("input_len") or 784)
@@ -454,7 +454,6 @@ def predict(model: str | None = None, samples=None, path: str | None = None, ind
 
     payload = {
         "model": name,
-        "version": artifact.version,
         "framework": artifact.framework,
         "task": artifact.meta.get("task"),
         "input_len": input_len,
@@ -465,7 +464,7 @@ def predict(model: str | None = None, samples=None, path: str | None = None, ind
     }
 
     # ---- 出图：预测分布 + 窗口波形（失败不影响推理结果）----
-    figure_result = inference_figures(name, artifact.version, payload, matrix)
+    figure_result = inference_figures(name, payload, matrix)
     payload["figures"] = figure_result["figures"]
     payload["figures_dir"] = figure_result["dir"]
     if figure_result.get("error"):
@@ -474,7 +473,7 @@ def predict(model: str | None = None, samples=None, path: str | None = None, ind
     if write_db:
         payload["db"] = _write_db(name, artifact, payload, input_info, predictions, training_id,
                                   int((time.time() - started) * 1000), client_ip,
-                                  {"model": name, "version": version, "path": path,
+                                  {"model": name, "path": path,
                                    "samples": f"{matrix.shape[0]}x{matrix.shape[1]}" if samples is not None else None,
                                    "index": index, "limit": limit},
                                   output_path=figure_result["dir"])

@@ -26,7 +26,8 @@ export const platformApi = {
 	artifact: (name: string) => request({ url: `/models/${encodeURIComponent(name)}`, method: 'get' }),
 	// 增删改查（Models 表登记行）
 	createModel: (data: any) => request({ url: '/models', method: 'post', data }),
-	// 上传模型文件夹（权重 + 可选 scaler.npz / meta.json），落盘到 data/models/<名>/<版本>/
+	// 上传模型文件夹（权重 + 可选 scaler.npz / meta.json），落盘到 data/models/<名>/
+	// 一个模型只有一个产物：同名再上传会直接替换旧产物（后端在 warnings 里说明）
 	uploadModel: (form: FormData) =>
 		request({ url: '/models/upload', method: 'post', data: form, headers: { 'Content-Type': 'multipart/form-data' } }),
 	updateModel: (name: string, data: any) =>
@@ -38,9 +39,9 @@ export const platformApi = {
 		request({ url: `/models/${encodeURIComponent(name)}/overview`, method: 'get' }),
 	deleteModelRecord: (name: string, force = false) =>
 		request({ url: `/models/${encodeURIComponent(name)}?scope=record${force ? '&force=true' : ''}`, method: 'delete' }),
-	// 删除产物版本（文件）
-	deleteVersion: (name: string, version: string) =>
-		request({ url: `/models/${encodeURIComponent(name)}?version=${encodeURIComponent(version)}`, method: 'delete' }),
+	// 删除该模型的产物文件（权重/scaler/meta，不动库表登记）；没有版本号，删的就是唯一那个产物
+	deleteArtifact: (name: string) =>
+		request({ url: `/models/${encodeURIComponent(name)}?scope=artifact`, method: 'delete' }),
 	train: (data: any) => request({ url: '/train', method: 'post', data }),
 	trainings: (limit = 20) => request({ url: `/trainings?limit=${limit}`, method: 'get' }),
 

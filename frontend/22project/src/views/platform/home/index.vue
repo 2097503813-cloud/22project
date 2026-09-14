@@ -23,7 +23,7 @@
 						<el-descriptions-item label="表行数">
 							<el-tag v-for="(v, k) in db.counts || {}" :key="k" size="small" class="tag-gap">{{ k }}: {{ v }}</el-tag>
 						</el-descriptions-item>
-						<el-descriptions-item label="模型产物">{{ artifacts.length }} 个版本</el-descriptions-item>
+						<el-descriptions-item label="模型产物">{{ artifacts.length }} 个模型</el-descriptions-item>
 						<el-descriptions-item label="出图目录">{{ health.figures?.dir || '—' }}</el-descriptions-item>
 					</el-descriptions>
 				</el-card>
@@ -45,8 +45,8 @@
 					<el-divider />
 					<div class="hint">已落盘产物</div>
 					<div class="quick">
-						<el-tag v-for="a in artifacts" :key="a.model + a.version" class="tag-gap" size="small">
-							{{ a.model }} {{ a.version }} · {{ a.metrics?.test_accuracy != null ? Number(a.metrics.test_accuracy).toFixed(4) : '—' }}
+						<el-tag v-for="a in artifacts" :key="a.model" class="tag-gap" size="small">
+							{{ a.model }} · {{ a.metrics?.test_accuracy != null ? Number(a.metrics.test_accuracy).toFixed(4) : '—' }}
 						</el-tag>
 						<span v-if="!artifacts.length" class="hint">还没有产物，去「模型管理 → 训练」跑一次</span>
 					</div>
@@ -105,7 +105,7 @@ const tasks = ref<any[]>([]);
 const db = computed(() => health.value.database || {});
 
 const kpis = computed(() => [
-	{ label: '模型产物', value: artifacts.value.length, hint: 'data/models 下已落盘的版本数' },
+	{ label: '模型产物', value: artifacts.value.length, hint: 'data/models 下已落盘的模型数' },
 	{ label: '训练次数', value: db.value.counts?.Trainings ?? '—', hint: 'Trainings 表行数' },
 	{ label: '推理任务', value: db.value.counts?.InferenceTasks ?? '—', hint: 'InferenceTasks 表行数' },
 	{ label: '结果明细', value: db.value.counts?.InferenceResults ?? '—', hint: 'InferenceResults 表行数' },

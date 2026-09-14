@@ -10,7 +10,8 @@
 
     体检    GET  /health、/datasets、/system、/system/logs
     模型    GET  /models、/models/<name>、/models/<name>/overview、/models/<name>/references
-            POST /models（登记）、POST /models/upload（上传）、DELETE /models/<name>?version=
+            POST /models（登记）、POST /models/upload（上传）
+            DELETE /models/<name>?scope=artifact|record
     训练    POST /train、GET /trainings
     推理    POST /predict、GET /inference-tasks、GET /inference-tasks/<id>
     数据集  GET  /datasets/db、POST /datasets/db（登记）、POST /datasets/upload（上传）
@@ -25,7 +26,6 @@ from __future__ import annotations
 import json
 import platform
 import re
-import shutil
 import sys
 import traceback
 from datetime import datetime
@@ -42,7 +42,7 @@ from .config import config
 from .db import DBError, database
 from .figures import FIG_DIR, clear_figures, list_figures
 from .inference import InvalidInput, predict
-from .registry import _VERSION_RE, delete_version, list_artifacts, load_artifact, next_version_dir
+from .registry import abort_artifact, begin_artifact, commit_artifact, delete_artifact, list_artifacts, load_artifact
 from .training import MODEL_META, ALIASES, normalize_model, train
 
 
@@ -317,11 +317,10 @@ class Health(Resource):
             "service": "ok",
             "config": config.describe(),
             "database": db_state,
-            # by_model 把产物按模型分组、只列版本号：前端顶栏一眼看出"哪些模型各有几个版本"
+            # models 列出"哪些模型已经有产物"：每个模型只有一个产物，所以就是名字清单
             "artifacts": {
                 "count": len(artifacts),
-                "by_model": {name: [a.version for a in artifacts if a.name == name]
-                             for name in sorted({a.name for a in artifacts})},
+                "models": [a.name for a in artifacts],
             },
             "figures": {"count": len(list_figures(limit=1000)), "dir": str(FIG_DIR)},
             # 写死的"已知问题"提示：告诉使用者本服务不排队、以及数据管线那个已修正的坑，
@@ -670,7 +669,6 @@ class Predict(Resource):
                     path=body.get("path"),
                     index=index,
                     limit=limit,
-                    version=body.get("version"),
                     training_id=_int(body.get("training_id"), None, "training_id"),
                     top_k=top_k,
                     write_db=bool(body.get("write_db", True)),
@@ -767,22 +765,22 @@ def _safe_model_name(name: str) -> str:
 
 
 def _rewrite_meta_model(directory: Path, model_name: str) -> None:
-    """把 <目录>/*/meta.json 里的 `model` 字段统一改写成 model_name（改名与回滚共用）。
+    """把 <目录>/meta.json 里的 `model` 字段改写成 model_name（改名与回滚共用）。
 
     ⚠️ 无条件改写，**不做** old→new 的相等判断：上传时写进 meta 的 model 大小写可能和目录名不一致
     （目录 1dcnn、meta 里写的 1DCNN），而 Windows 文件系统大小写不敏感，一比就"看起来相等"从而漏改，
     改名后 meta 里的模型名会永远停在老写法上。
-    ⚠️ 单个 meta 损坏/非 JSON 直接跳过：改名是有副作用的长流程，为一个坏文件半途而废，
+    ⚠️ meta 损坏/非 JSON 直接跳过：改名是有副作用的长流程，为一个坏文件半途而废，
     会留下"目录搬了、meta 没改"这种更难解释的不一致。
     """
-    for meta_file in directory.glob("*/meta.json"):
-        try:
-            payload = json.loads(meta_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(payload, dict):
-            payload["model"] = model_name
-            meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta_file = directory / "meta.json"
+    try:
+        payload = json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if isinstance(payload, dict):
+        payload["model"] = model_name
+        meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _rename_model(old: str, new: str) -> dict:
@@ -790,7 +788,7 @@ def _rename_model(old: str, new: str) -> dict:
 
     改名必须**同步四处**，少一处就出现"找得到一半、找不到另一半"的鬼状态：
       ① 产物目录      data/models/<老名> → data/models/<新名>
-      ② 各版本 meta    data/models/<新名>/vN/meta.json 里的 model 字段
+      ② 产物 meta     data/models/<新名>/meta.json 里的 model 字段
       ③ 库里的路径    Trainings.ModelPath / InferenceTasks.InputPath·OutputPath /
                       ModelDeployments.DeployedPath（实际由 db.rename_model_paths 按前缀 REPLACE）
       ④ Models 表行   ModelName（本函数**不管**，由调用方接着调 database.update_model(..., new_name=)）
@@ -868,11 +866,9 @@ class ArtifactDetail(Resource):
 
     def get(self, model_name):
         """取产物档案。model_name 允许任意写法（1DCNN / 1dcnn / 上传名），先归一再查。"""
-        # 先过 _artifact_key()：磁盘目录只认小写内部键，1DCNN / 上传名都得换算；
-        # version 缺省（None）时由 load_artifact 自己取最新版本，所以前端不传也能看到档案。
+        # 先过 _artifact_key()：磁盘目录只认小写内部键，1DCNN / 上传名都得换算
         try:
-            artifact = load_artifact(_artifact_key(model_name), request.args.get("version"))
-        # 两个 except 分工不同：产物不存在 → 404（资源不在），版本号写错 → 400（参数不对）
+            artifact = load_artifact(_artifact_key(model_name))
         except FileNotFoundError as exc:
             return {"error": str(exc)}, 404
         except ValueError as exc:
@@ -880,18 +876,18 @@ class ArtifactDetail(Resource):
         return artifact.to_dict()
 
     def delete(self, model_name):
-        """删除：?version=vN 删产物版本；?scope=record 删 Models 表登记行（带引用检查）。"""
-        # 两种删除口径必须由调用方**显式选一个**：删的是磁盘产物版本，还是库表登记行？
+        """删除：?scope=artifact 删磁盘产物；?scope=record 删 Models 表登记行（带引用检查）。"""
+        # 两种删除口径必须由调用方**显式选一个**：删的是磁盘产物，还是库表登记行？
         # 猜着删太危险（一个不可恢复、一个带外键引用检查），所以两个都没给就直接报错。
+        # ⚠️ 以前是 `?version=vN` 删单个版本；产物已经拍平成"一个模型一份"，所以改成 scope。
         try:
-            version = request.args.get("version")
             scope = (request.args.get("scope") or "").strip()
-            if version:
-                return delete_version(_artifact_key(model_name), version), 200
+            if scope == "artifact":
+                return delete_artifact(_artifact_key(model_name)), 200
             if scope == "record":
                 force = request.args.get("force") in ("1", "true", "True")
                 return database.delete_model(_db_model_name(model_name), force=force), 200
-            raise InvalidInput("删除必须指定 ?version=vN（删产物版本）或 ?scope=record（删库表登记行）")
+            raise InvalidInput("删除必须指定 ?scope=artifact（删磁盘产物）或 ?scope=record（删库表登记行）")
         except FileNotFoundError as exc:
             return {"error": str(exc)}, 404
         except DBError as exc:
@@ -960,15 +956,13 @@ class ModelOverview(Resource):
         # 档案页要能如实展示这种不一致（与 GET /models 刻意返回两份清单是同一个思路）。
         registration = next((r for r in database.models_in_db()
                              if str(r["ModelName"]).lower() == name.lower()), None)
-        # ⚠️ list_artifacts() 会真的去遍历目录并逐个读 meta.json，是磁盘 IO，只调一次：
-        #    原先这里先 `[... for a in list_artifacts(key)]` 再 `list_artifacts(key)[-1]`，
-        #    同一个请求把每个版本目录读了两遍（模型版本一多，档案页的耗时直接翻倍）。
+        # ⚠️ list_artifacts() 会真的去遍历目录并读 meta.json，是磁盘 IO；一个模型只有一个产物，
+        #    所以取第一条就是全部
         artifacts = list_artifacts(key)
-        versions = [a.to_dict() for a in artifacts]
+        artifact = artifacts[0].to_dict() if artifacts else None
         params, metrics, labels, dataset, confusion = {}, {}, None, None, None
-        if versions:
-            # versions 是从旧到新排列，所以 [-1] 才是**最新版本**，参数一律取最新那份
-            meta = artifacts[-1].meta                     # 最新版本
+        if artifacts:
+            meta = artifacts[0].meta
             params = meta.get("params") or {}
             metrics = meta.get("metrics") or {}
             labels = meta.get("labels")
@@ -985,8 +979,7 @@ class ModelOverview(Resource):
         return {
             "model": name, "artifact_key": key,
             "registration": registration,
-            "artifact_versions": versions,
-            "latest_version": versions[-1]["version"] if versions else None,
+            "artifact": artifact,          # 该模型的唯一产物；还没有产物时是 None
             # ⚠️ metrics 里剔除 history（逐 epoch 的训练曲线），体积比其它指标大一个量级，
             # 曲线另有 /figures 的图片可看，档案页不需要它
             "params": params, "metrics": {k: v for k, v in metrics.items() if k != "history"},
@@ -999,7 +992,7 @@ class ModelOverview(Resource):
 class ModelUpload(Resource):
     """上传模型（文件夹，或者单个/多个文件）：落盘成 data/models/<模型名>/<版本>/ 并登记 Models 表。
 
-    表单字段：`name`（模型名，必填）、`version`（可选，默认自动取下一个 vN）、
+    表单字段：`name`（模型名，必填）、`description`（可选）、`dataset`（可选），
     以及多个 `file`——浏览器既可以用 `<input type="file" webkitdirectory>` 选整个文件夹，
     也可以用普通 `<input type="file" multiple>` 选单个/多个文件，两条路走同一套逻辑
     （服务端按 basename 扁平化保存，丢掉相对路径）。
@@ -1054,28 +1047,21 @@ class ModelUpload(Resource):
                     "hint": "支持 Keras 的 .h5/.keras（需含 model_weights 组或 config.json）、"
                             "PyTorch 的 .pt/.pth（torch 的 zip 检查点）、pickle 的 .pkl"}, 400
 
-        # 2) 决定版本目录
-        version = (request.form.get("version") or "").strip()
-        root = config.model_dir / safe
-        if version:
-            if not _VERSION_RE.match(version):
-                return {"error": f"版本号格式不合法：{version}（应为 v1、v2 这种）"}, 400
-            target = root / version
-            if target.exists():
-                return {"error": f"{safe}/{version} 已存在，换个版本号或先删除该版本"}, 409
-            target.mkdir(parents=True, exist_ok=False)
-        else:
-            target = next_version_dir(safe)
+        # 2) 产物目录：一个模型一份，**重新上传 = 直接替换旧产物**（没有版本号可选）。
+        #    先写进暂存目录，写完整了才换上去 —— 否则一次失败的上传会把上一份好产物毁掉。
+        root, stage = begin_artifact(safe)
+        replaced = (root / "meta.json").is_file()
 
         # 3) 落盘
         try:
             for filename, blob in blobs.items():
-                (target / filename).write_bytes(blob)
+                (stage / filename).write_bytes(blob)
             # meta.json 只在这里写一次：用户带了就以他的为准，没带就按探测结果现造（_upload_meta 内部判断）
-            meta, meta_generated = _upload_meta(form, safe, target.name, weights, probe, scaler, meta_blob)
-            (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            meta, meta_generated = _upload_meta(form, safe, weights, probe, scaler, meta_blob)
+            (stage / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            commit_artifact(root, stage)
         except Exception as exc:
-            shutil.rmtree(target, ignore_errors=True)
+            abort_artifact(stage)                  # 只清暂存，旧产物原封不动
             return {"error": f"落盘失败，已回滚：{type(exc).__name__}: {exc}"}, 500
 
         # 4) 登记 Models 表（同名就取用，不重复插）
@@ -1089,6 +1075,8 @@ class ModelUpload(Resource):
             model_id, db_error = None, str(exc)
 
         warnings = []
+        if replaced:
+            warnings.append(f"这个模型之前已有产物，已被本次上传替换（旧产物不再保留）")
         if not meta.get("input_len"):
             warnings.append("没能自动识别输入长度（input_len），推理时按默认 784 处理；"
                             "想固定长度就在产物目录的 meta.json 里补一个 input_len")
@@ -1096,11 +1084,11 @@ class ModelUpload(Resource):
             warnings.append(f"meta.json 声明的权重是 {meta['weights_file']}，探测选中的是 {weights[0]}（以 meta 为准）")
 
         return {
-            "model": safe, "version": target.name, "directory": str(target),
+            "model": safe, "directory": str(root),
             "framework": meta.get("framework"), "weights": meta.get("weights_file") or weights[0],
             "input_len": meta.get("input_len"), "num_classes": meta.get("num_classes"),
             "labels": meta.get("labels"), "scaler": meta.get("scaler_file"),
-            "meta_generated": meta_generated,
+            "meta_generated": meta_generated, "replaced": replaced,
             "probe": {"weights": weights[0], "framework": weights[1], "reason": probe.get("reason"),
                       "input_len": probe.get("input_len"), "num_classes": probe.get("num_classes")},
             "probed_files": probed,
@@ -1152,7 +1140,7 @@ def _upload_blobs(files, keep_suffix, weight_whitelist, max_mb):
     return blobs, skipped, candidates, scaler, meta_blob
 
 
-def _upload_meta(form, safe, version_name, weights, probe, scaler, meta_blob):
+def _upload_meta(form, safe, weights, probe, scaler, meta_blob):
     """决定落盘的 meta.json 内容，返回 (meta, generated)。
 
     用户带了 meta.json 就**以他的为准**（只补缺失项），没带就按探测结果现造一份；
@@ -1164,7 +1152,6 @@ def _upload_meta(form, safe, version_name, weights, probe, scaler, meta_blob):
         except Exception:
             meta = None                         # 坏 JSON 当"没带"，退回自动生成，不让整个上传失败
         if isinstance(meta, dict):
-            meta.setdefault("version", version_name)
             meta.setdefault("weights_file", weights[0])
             # ⚠️ 上传的 meta.json 是用户提供的，它自称 trusted 也不算数：强制标成不可信
             meta["trusted"] = False
@@ -1182,12 +1169,12 @@ def _upload_meta(form, safe, version_name, weights, probe, scaler, meta_blob):
     if not labels and num_classes == 10:       # CWRU 十类，标签直接给现成的
         labels = [label for _, _, label in sorted(ds.CWRU_0HP_CLASSES, key=lambda row: row[1])]
     return {
-        "model": safe, "version": version_name, "framework": weights[1],
+        "model": safe, "framework": weights[1],
         "task": "classification" if weights[1] != "adtk" else "anomaly_detection",
         "input_len": input_len, "num_classes": num_classes or (len(labels) or None),
         "labels": labels or None, "weights_file": weights[0],
         # scaler 只在收到名为 scaler.npz 的文件时才被置位（见 _upload_blobs），
-        # 而版本目录是全新的，所以"没收到就是没有"——不需要再去磁盘上探一次
+        # 所以"没收到就是没有"——不需要再去磁盘上探一次
         "scaler_file": "scaler.npz" if scaler else None,
         "params": {"source": "uploaded"}, "metrics": {},
         "dataset": {"name": form.get("dataset") or None, "path": None, "stats": {}},
@@ -1465,7 +1452,7 @@ class SystemInfo(Resource):
             "database": {"dialect": database.dialect, "ok": db_ok, "counts": counts,
                          "bootstrap": database.last_bootstrap},
             "artifacts": {"count": len(artifacts),
-                          "items": [{"model": a.name, "version": a.version, "framework": a.framework,
+                          "items": [{"model": a.name, "framework": a.framework,
                                      "weights": str(a.weights),
                                      "size_kb": round(a.weights.stat().st_size / 1024, 1)} for a in artifacts]},
             "figures": {"count": len(figure_items),

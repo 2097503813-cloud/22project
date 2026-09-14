@@ -27,12 +27,12 @@
 							<div class="hint">状态 {{ row.reg?.Status || '—' }} · {{ row.reg?.IsActive ? '已启用' : '已停用' }}</div>
 						</template>
 					</el-table-column>
-					<!-- 列表只回答「有没有产物、什么框架、第几版」；参数细节点行看下方详情卡，不重复搬运 -->
+					<!-- 列表只回答「有没有产物、什么框架」；参数细节点行看下方详情卡，不重复搬运 -->
 					<el-table-column label="产物" min-width="160" align="center">
 						<template #default="{ row }">
 							<template v-if="row.art">
 								<el-tag size="small" type="success">{{ fwLabel(row.art.framework) }}</el-tag>
-								<span class="ml">{{ row.art.version }}</span>
+								<span class="ml">{{ (row.art.weights || '').split(/[\\/]/).pop() || '—' }}</span>
 							</template>
 							<span v-else class="hint">无产物</span>
 						</template>
@@ -68,14 +68,16 @@
 				</template>
 				<div v-if="!overview" class="empty">尚未选择模型</div>
 				<template v-else>
+					<!-- overview.artifact 可能是 null（登记了但还没训练/上传过）：给一句话，其余字段照旧显示「—」 -->
+					<el-alert v-if="!curArt" type="info" :closable="false" show-icon class="mb"
+						title="该模型还没有产物（未训练，也没上传过文件夹），下面只有登记信息与超参。" />
 					<el-descriptions :column="3" border size="small">
-						<el-descriptions-item label="框架">{{ latestArt.framework || '—' }}</el-descriptions-item>
-						<el-descriptions-item label="版本">{{ overview.latest_version || '—' }}</el-descriptions-item>
-						<el-descriptions-item label="输入长度">{{ latestArt.input_len ?? '—' }}</el-descriptions-item>
+						<el-descriptions-item label="框架">{{ curArt.framework || '—' }}</el-descriptions-item>
+						<el-descriptions-item label="输入长度">{{ curArt.input_len ?? '—' }}</el-descriptions-item>
 
 						<!-- 分类/回归看"类别数"，异常检测没有类别，改看检测器与判定阈值 -->
 						<el-descriptions-item v-if="!isAnomalyModel" label="类别数">
-							{{ latestArt.num_classes ?? '—' }}
+							{{ curArt.num_classes ?? '—' }}
 						</el-descriptions-item>
 						<template v-else>
 							<el-descriptions-item label="检测器">
@@ -85,7 +87,7 @@
 						</template>
 
 						<el-descriptions-item label="权重文件">
-							{{ (latestArt.weights || '').split('\\').pop() || '—' }}
+							{{ (curArt.weights || '').split(/[\\/]/).pop() || '—' }}
 						</el-descriptions-item>
 						<el-descriptions-item label="参数来源">{{ overview.params?.source === 'uploaded' ? '文件夹上传' : '训练生成' }}</el-descriptions-item>
 						<el-descriptions-item v-if="isAnomalyModel" label="基线文件">
@@ -199,7 +201,7 @@
 									<el-tag :type="trainResult.status === '成功' ? 'success' : 'danger'" size="small">{{ trainResult.status }}</el-tag>
 									耗时 {{ trainResult.duration_sec }} 秒
 								</el-descriptions-item>
-								<el-descriptions-item label="产物">{{ trainResult.artifact?.weights }}（{{ trainResult.artifact?.version }}）</el-descriptions-item>
+								<el-descriptions-item label="产物">{{ trainResult.artifact?.weights || '—' }}</el-descriptions-item>
 
 								<!-- ===== 按任务类型分两套模板 =====
 								     分类（有监督）：测试/验证准确率 + loss + 训练/验证/测试切分（保持原来的 7 行）；
@@ -292,7 +294,7 @@
 						<div v-if="!predResult" class="empty">还没有推理结果</div>
 						<template v-else>
 							<el-descriptions :column="1" border size="small">
-								<el-descriptions-item label="模型 / 版本">{{ predResult.model }} · {{ predResult.version }} · {{ predResult.framework }}</el-descriptions-item>
+								<el-descriptions-item label="模型">{{ predResult.model }} · {{ predResult.framework }}</el-descriptions-item>
 								<el-descriptions-item label="样本数">{{ predResult.count }}（窗口长度 {{ predResult.input_len }}）</el-descriptions-item>
 								<el-descriptions-item label="摘要">{{ JSON.stringify(predResult.summary) }}</el-descriptions-item>
 								<el-descriptions-item label="写库"><Tag :text="predResult.db" /></el-descriptions-item>
@@ -405,7 +407,7 @@
 			</el-form-item>
 			<el-form-item label="说明"><el-input v-model="form.Description" type="textarea" :rows="3" /></el-form-item>
 		</el-form>
-		<div class="hint">编辑只改登记信息；换权重 / 加版本请用工具栏的「上传模型」。</div>
+		<div class="hint">编辑只改登记信息；换权重请用工具栏的「上传模型」（同名会直接替换旧产物）。</div>
 		<template #footer>
 			<el-button @click="dialog.formVisible = false">取消</el-button>
 			<el-button type="primary" @click="submitForm">保存</el-button>
@@ -416,13 +418,14 @@
 	<el-dialog v-model="dialog.uploadVisible" title="上传模型（文件夹，或单个/多个文件）" width="560px">
 		<el-form label-width="90px" size="small">
 			<el-form-item label="模型名 *">
-				<el-input v-model="uploadForm.name" placeholder="唯一键，如 1DCNN；同名会新增一个版本" />
+				<el-input v-model="uploadForm.name" placeholder="唯一键，如 1DCNN；同名会直接替换旧产物" />
 			</el-form-item>
 			<el-form-item label="说明"><el-input v-model="uploadForm.description" placeholder="可选" /></el-form-item>
 		</el-form>
 		<div class="hint">
 			权重文件必须有：<code>.h5 .keras .pt .pth .pkl</code>；<code>scaler.npz</code>、<code>meta.json</code> 可选。
 			服务端会先<strong>判断这是不是一个模型</strong>（看文件内容，不只看后缀），再自动读出输入长度与类别数。
+			同一个模型名再次上传会<strong>直接替换</strong>旧产物（后端会在结果里提示"已替换旧产物"）。
 		</div>
 		<div class="mt" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
 			<input ref="folderInput" type="file" webkitdirectory directory multiple style="display: none" @change="onPick" />
@@ -558,19 +561,16 @@ const mergedRows = computed(() => {
 	(artifacts.value || []).forEach((a: any) => {
 		const key = String(a.model).toLowerCase();
 		if (!map.has(key)) map.set(key, { name: a.model, reg: null, art: null });
-		map.get(key).art = a;              // artifacts 按版本升序返回，覆盖后即最新版本
+		map.get(key).art = a;              // 一个模型只有一个产物，同名直接覆盖
 	});
 	return [...map.values()];
 });
-/** 最新一版产物 + 是不是异常检测类模型（决定详情卡展示哪一套字段） */
-const latestArt = computed(() => {
-	const versions = overview.value?.artifact_versions || [];
-	return versions[versions.length - 1] || {};
-});
+/** 当前产物（唯一那个）；模型还没有产物时是 null —— 详情卡照常渲染，字段显示「—」 */
+const curArt = computed(() => overview.value?.artifact || null);
 const isAnomalyModel = computed(() => {
 	const reg = overview.value?.registration || {};
 	return String(reg.ModelType || '').toLowerCase() === 'anomalydetection'
-		|| latestArt.value.framework === 'adtk'
+		|| curArt.value?.framework === 'adtk'
 		|| (overview.value?.params || {}).detector != null;
 });
 /** 阈值/分数是 1e-3 量级的小数，用科学计数法更好读 */
@@ -684,14 +684,6 @@ const removeModel = async (row: any) => {
 	ElMessage.success(`已删除 ${res.deleted}${res.cascaded ? '（已连带清理引用记录）' : ''}`);
 	if (overview.value?.model === row.name) overview.value = null;
 	await loadModels();
-};
-
-/** 删除某个产物版本（只删文件，不动库表登记） */
-const removeVersionFile = async (name: string, version: string) => {
-	await ElMessageBox.confirm(`删除 ${name} 的产物版本 ${version}？权重/scaler/meta 一并删除。`, '危险操作', { type: 'warning' });
-	const res: any = await platformApi.deleteVersion(name, version);
-	ElMessage.success(`已删除 ${res.deleted}（${res.files} 个文件）`);
-	await Promise.all([loadModels(), loadOverview(name)]);
 };
 
 /** 上传模型：文件夹或单个/多个文件都行；不再手填输入长度/类别数——服务端探测后自动识别 */

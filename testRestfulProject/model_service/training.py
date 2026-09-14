@@ -573,7 +573,7 @@ def train(model: str | None = None, options: dict | None = None) -> dict:
     四步走，任何一步失败都**不会**让接口静默成功：
 
         ① 建日志 + 劫持 stdout → 交给对应 trainer 去练（权重先留在内存）
-        ② save_artifact 落盘：data/models/<名>/vN/{权重, scaler.npz, meta.json}
+        ② save_artifact 落盘：data/models/<名>/{权重, scaler.npz, meta.json}（**直接替换旧产物**）
         ③ 出图（失败只记 figures_error，不影响训练结论）
         ④ 写库 Datasets → Models → Trainings（连失败也写一行 Status=失败，便于追溯）
 
@@ -595,7 +595,7 @@ def train(model: str | None = None, options: dict | None = None) -> dict:
             payload = _TRAINERS[name](options)      # 三个 trainer 之一，返回结构统一的 payload
 
         # ② 落盘：saver 是 trainer 塞进 payload 的回调，各框架保存方式不同（.h5/.pt/pickle），
-        #    由 trainer 决定怎么写；这里只管"版本目录 + meta.json + 失败回滚"这套公共约定。
+        #    由 trainer 决定怎么写；这里只管"产物目录 + meta.json + 失败回滚"这套公共约定。
         #    lib 里的字段全是"产物自解释"所必需的：input_len 决定推理切多长的窗，
         #    labels 让模型文件能解释 0..9 对应哪种故障，dataset.stats 记录数据指纹。
         saver = payload.pop("saver")
@@ -618,7 +618,7 @@ def train(model: str | None = None, options: dict | None = None) -> dict:
             "provenance": "train",
         })
         # ---- 出图（失败不影响训练结果，只在响应里回报错误）----
-        figure_result = training_figures(name, artifact.version, artifact.meta,
+        figure_result = training_figures(name, artifact.meta,
                                          {"confusion": payload.get("confusion"),
                                           "per_class": payload.get("per_class")})
         result.update({

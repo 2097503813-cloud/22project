@@ -43,3 +43,6 @@ testRestfulProject/_*.py
 testRestfulProject/data/**/*.db
 
 testRestfulProject/requirements.lock
+
+# 临时审计/扫描产物
+_dcscan_tmp/

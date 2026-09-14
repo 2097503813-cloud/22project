@@ -65,10 +65,19 @@ _HEAD_LAYER_RE = re.compile(r"(fc|classifier|linear|head|dense|out|output)\d*\.w
 
 
 def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
-    """从 Keras 的 model_config（dict）里挖出 input_len 与类别数（最后一个 Dense 的 units）。"""
+    """从 Keras 的 model_config（dict）里挖出 input_len 与类别数（最后一个 Dense 的 units）。
+
+    ⚠️ 形参名 `config` 遮蔽了模块级 `from .config import config`（全局配置对象）：
+    本函数里的 config 一律指「Keras 导出的模型结构 dict」，不要当全局配置用。
+    这是纯猜测逻辑，挖不到就返回 (None, None)、**绝不抛异常** —— 猜不出来只是少给用户
+    一条提示，不该让上传/预览整个失败。
+    """
+    # 存档可能是 {"class_name": ..., "config": {...}} 外壳，也可能直接就是内层 config，两种都试
     conf = config.get("config", config) if isinstance(config, dict) else None
     if not isinstance(conf, dict):
         return None, None
+    # layers 可能缺失或不是 list（手工改过的/非 Sequential 的存档），统一成 []，
+    # 后面两个循环就不用再判类型了
     layers = conf.get("layers") if isinstance(conf.get("layers"), list) else []
 
     def first_dim(shape) -> int | None:
@@ -79,19 +88,26 @@ def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
         """
         if not isinstance(shape, list):
             return None
+        # 只认正整数维度：字符串维度名（"channels" 之类）、None（未知的 batch 维）、0 全部过滤掉
         dims = [d for d in shape[1:] if isinstance(d, int) and d > 0]
         return int(dims[0]) if dims else None
 
     input_len = None
+    # 逐层扫而不是只看第一层：导出后的 config 里输入形状挂在哪一层并不固定
     for layer in layers:                                   # 输入层：Keras2 用 batch_input_shape，Keras3 用 batch_shape
         lc = layer.get("config") if isinstance(layer, dict) else None
         if isinstance(lc, dict):
+            # `or` 的语义正好是"左边没结果才退到右边"，所以 Keras2/Keras3 两个键可以顺手写一行；
+            # 拿到就立刻 break，避免被后面某层的空形状覆盖成 None
             input_len = first_dim(lc.get("batch_input_shape")) or first_dim(lc.get("batch_shape"))
             if input_len:
                 break
     if input_len is None:                                  # 顶层也可能直接挂形状
         input_len = first_dim(conf.get("batch_input_shape")) or first_dim(conf.get("batch_shape"))
     units = None
+    # 类别数 = 输出层的神经元数。必须**从后往前**找第一个带 units 的层：
+    # ⚠️ 不能直接取 layers[-1]，导出结构最后几层常常是 Activation/Dropout 这类没有 units 的层。
+    # ⚠️ 该等式只在"最后一层是分类输出"时成立；回归头或嵌套子模型读出来的只是"最后一层的宽度"。
     for layer in reversed(layers):                         # 最后一个 Dense 的 units 就是类别数
         lc = layer.get("config") if isinstance(layer, dict) else None
         if isinstance(lc, dict) and isinstance(lc.get("units"), int) and lc["units"] > 0:
@@ -260,6 +276,8 @@ class ApiIndex(Resource):
     """GET /api —— 接口索引，给人和「系统管理→接口索引」页看的自描述清单。"""
 
     def get(self):
+        # ⚠️ 这份清单是**手写**的，不是从 Flask 的 url_map 自动生成的 —— 新增路由时必须同步这里，
+        # 否则「接口索引」页会漏掉新接口。好处是能顺手写上每条的用途说明。
         return {
             "service": "model_service",
             "flow": "Web访问 → 算法模型 → 训练 → 数据集 → 模型产物 → 推理 → (边缘设备)",
@@ -286,6 +304,7 @@ class ApiIndex(Resource):
                 "POST /system/maintenance": "维护操作（目前支持清空图库 target=figures）",
                 "GET/POST/PUT/DELETE /todos": "原有的示例接口，保留不动",
             },
+            # 别名表的 value 才是内部键：cnn / 算法模型1 / 模型1 等多个别名指向同一个键，所以先 set 去重
             "models": sorted(set(ALIASES.values())),
         }
 
@@ -298,18 +317,23 @@ class Health(Resource):
     """
 
     def get(self):
+        # 探测数据库用 ping()：它内部把异常吞成 {ok: False, error: ...}，
+        # 所以库挂了这里也照样能返回 200，前端只需看 database.ok
         db_state = database.ping()
         artifacts = list_artifacts()
         return {
             "service": "ok",
             "config": config.describe(),
             "database": db_state,
+            # by_model 把产物按模型分组、只列版本号：前端顶栏一眼看出"哪些模型各有几个版本"
             "artifacts": {
                 "count": len(artifacts),
                 "by_model": {name: [a.version for a in artifacts if a.name == name]
                              for name in sorted({a.name for a in artifacts})},
             },
             "figures": {"count": len(list_figures(limit=1000)), "dir": str(FIG_DIR)},
+            # 写死的"已知问题"提示：告诉使用者本服务不排队、以及数据管线那个已修正的坑，
+            # 免得看到一个慢接口就以为是卡死
             "warnings": [
                 "本服务不做训练/推理排队，/train 是同步阻塞的（开发服务器已开 threaded）。",
                 "数据管线已知问题：原脚本会把越界切片补成整行 NaN；服务侧改为拒绝并回报。",
@@ -329,10 +353,13 @@ class ModelList(Resource):
         try:
             db_models = database.models_in_db()
         except DBError as exc:
+            # ⚠️ 库查询失败时把 error 塞进列表，而不是返回 503：磁盘产物照样能列出来，
+            # 前端只需在"库表"那一列标不可用，不至于因为库挂了就连产物都看不到
             db_models = [{"error": str(exc)}]
         return {
             "artifacts": [a.to_dict() for a in artifacts],
             "db_models": db_models,
+            # 内置模型的元数据（内部键 → 描述/类型/db_name），给前端下拉框和说明文案用
             "known_models": {name: MODEL_META[name] for name in MODEL_META},
         }
 
@@ -347,23 +374,41 @@ class DatasetList(Resource):
         损坏不应该连带看不到其它数据集。
         """
         out = {}
+        # 第一类：内置 .mat 数据集。config.dataset_dirs 是 {前端口径的数据集名: 真实目录}，
+        # 遍历顺序无所谓——最后返回的是一个 {key: 体检结果} 映射，前端按 key 取，不依赖顺序
         for name, path in config.dataset_dirs.items():
             try:
                 info = ds.describe_dataset(path)
+                # 下面三个字段都是**给前端下拉框用**的元信息，缺一个前端就得自己猜：
+                #   key          = 选中后回传给 /datasets/signal 的 dataset 参数（唯一标识）
+                #   dataset_type = matlab / tabular，前端据此决定要不要显示"工作表/列"选择器
+                #   dataset_dir  = 目录本身（出口脱敏会把它换成相对工作区的相对路径）
                 info["dataset_type"] = "matlab"
                 info["key"] = name
                 out[name] = info
             except Exception as exc:
+                # ⚠️ 单个数据集读失败也要占住自己的 key：前端列表里显示"这个数据集有问题"。
+                # 直接跳过（少一行）最容易被误会成"数据集被删了"，整页 500 则连别的数据集都看不到
                 out[name] = {"error": f"{type(exc).__name__}: {exc}", "dataset_dir": str(path),
                              "dataset_type": "matlab", "key": name}
+        # 第二类：上传的表格数据集。⚠️ iterdir() 之前必须先判 is_dir()：
+        # data/datasets 从没创建过或被人删掉时，iterdir() 会抛 FileNotFoundError 让整个 /datasets 挂掉；
+        # 这里当成"还没有上传过数据集"，返回空列表继续往下走
         upload_root = sorted([p for p in config.upload_dir.iterdir() if p.is_dir()], key=lambda p: p.name) \
             if config.upload_dir.is_dir() else []          # 目录被删掉时不该 500，当成"没有上传数据集"
         for directory in upload_root:
+            # key 前面加 "表格:" 前缀：用来和内置 .mat 的名字区分开，/datasets/signal 就是靠这个前缀
+            # 认出"这是上传目录下的数据集"并去 data/datasets/<名> 找文件的
             key = f"表格:{directory.name}"
             try:
+                # ⚠️ 这里读的是 tabular.describe_directory 的 **120 秒 TTL 缓存**结果：
+                # 刚上传完文件如果这里显示不出来，不是文件没进去，而是缓存没清
+                #（/datasets/upload 里那句 cache_clear() 就是为这个加的）
                 info = tabular.describe_directory(directory)
             except Exception as exc:
                 info = {"error": f"{type(exc).__name__}: {exc}", "files": []}
+            # 无论体检成功还是失败，都补齐同样几个字段，前端不用到处判 key 在不在：
+            # file_count / classes 缺失时给 0（空目录 = 0 个文件 0 个类别，比 null 好渲染）
             info.update({"key": key, "dataset_type": "tabular", "dataset_dir": str(directory),
                          "file_count": info.get("file_count", 0), "classes": info.get("classes", 0)})
             out[key] = info
@@ -425,19 +470,30 @@ class TablePreview(Resource):
     """表格预览：列统计 + 前 N 行 + 推荐信号列（数据展示/数据集管理都用它）。"""
 
     def get(self):
+        # path 必填：表格预览只认"工作区里的表格文件"，不接受把数据内联在请求里
         raw = request.args.get("path")
         if not raw:
             return {"error": "缺少 path 参数"}, 400
+        # ⚠️ 用户给的路径必须先过 _resolve_workspace_path()，别自己拼 Path：
+        # 它做两级回退（工作区优先、再试项目目录，所以 data/... 与 testRestfulProject/data/... 都能用），
+        # 并用 relative_to(workspace) 判定越界——字符串 startswith 会被 D:\22project_evil 这类同前缀目录绕过
         try:
             path = _resolve_workspace_path(raw)
         except InvalidInput as exc:
             return {"error": str(exc)}, 400
+        # 扩展名白名单先行：不是 csv/xlsx/xls 就 400 说清楚，别等 pandas 抛一层看不懂的错再回 500
         if not tabular.is_table(path):
             return {"error": f"不是可预览的表格文件（支持 {sorted(tabular.TABLE_SUFFIXES)}）：{raw}"}, 400
         try:
+            # rows = 预览多少行（前端表格默认显示 20 行）。⚠️ `or 20` 在 rows=0 时才生效——
+            # 0 行预览没有意义，退成默认 20 可以接受；但 0 有语义的参数（如 /predict 的 limit）不能照抄这写法。
+            # ⚠️ 另外注意 `_int()` 是在**这个 try 里面**求值的：传 rows=abc 时它抛的 InvalidInput（ValueError 子类）
+            #    会被下面的 `except Exception` 接住 → 返回 500 而不是 400，与其它接口"参数错→400"的口径不一致。
+            #    要改就得把 _int 挪到 try 之前（那是改行为，这里只记录现状）
             data = tabular.preview(path, rows=_int(request.args.get("rows"), 20, "rows") or 20,
                                    sheet=request.args.get("sheet"), column=request.args.get("column"))
         except Exception as exc:
+            # 文件损坏/加密/列名对不上/不是数值列……统一算"这份表格读不出来"：500 但带上异常类型，便于定位
             return {"error": f"{type(exc).__name__}: {exc}"}, 500
         return data, 200
 
@@ -513,10 +569,21 @@ class TrainingList(Resource):
     """GET /trainings?limit=N —— 最近训练记录（读库）。"""
 
     def get(self):
+        # limit 是"最近 N 条"：_int() 负责把 None 变默认 20（转不动则抛 InvalidInput），
+        # min(..., 200) 再夹上限，防止一次把整张表拉回来
+        # ⚠️ 这里用的是 `_int(...) or 20` 这个 falsy 写法：limit=0 是 falsy，会被悄悄换成 20（不是 0 条）。
+        #    对"最近 N 条"列表接口来说 0 条本来没意义，退成默认值与用户意图一致，所以这里可以接受；
+        #    但同样的写法搬到 /predict 的 limit 上就是 bug（0 有语义），那边刻意拆成两步
+        #    （`limit = _int(...)` 再 `if limit is None: limit = 1`）。两处写法不一致是**故意的**，别"统一风格"
+        # ⚠️ 还有一点：`_int()` 在 try 之外求值，且 InvalidInput 是 ValueError 子类、项目里没有全局处理器，
+        #    所以 ?limit=abc 会抛出未捕获异常 → 500，而不是参数错应有的 400（要改就得挪进 try，属于改行为）
         limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
+        # ⚠️ limit 最终由 db.py 用 f-string 拼进 `LIMIT {int(limit)}`：安全全靠 API 层保证它是"整数且 ≤200"，
+        #    db 那边的 int() 只是最后一道兜底（拼接 SQL 的写法本身不该再扩散）
         try:
             return {"trainings": database.recent_trainings(limit), "dialect": database.dialect}
         except DBError as exc:
+            # 读库失败 → 503 且带上 dialect：前端提示"数据库不可用"，而不是显示成"没有训练记录"
             return {"error": str(exc), "dialect": database.dialect}, 503
 
 
@@ -529,22 +596,31 @@ def _log_failed_inference(name: str, exc: Exception, client_ip: str | None, body
     注意**不能**为了写日志去 `ensure_model`：模型名打错就会凭空多出一行 Models 登记。
     只有"该模型已有训练记录"（能拿到 ModelID 满足外键）时才写。
     """
+    # ⚠️ 这是函数内"懒导入"：本模块顶层其实已经 import 了 training，所以今天并不构成循环依赖，
+    # 保持现状不影响行为（只有失败路径才会走到这里），别据此以为它跟 training 互相导入。
     from .training import db_model_name                     # 懒导入，避免与 training 循环依赖
     try:
+        # name 先归一成 Models 表的正式名（用户可能传 1dcnn/中文别名）；
+        # only_success=False 是刻意的：默认只认 Status='成功' 的训练行，若该模型唯一一次训练
+        # 就是失败的，写日志的外键锚点会取不到，失败日志又变成零痕迹。
         row = database.latest_training(db_model_name(name), only_success=False)
         if not row:
             return
+        # 状态码要和 Predict.post() 的异常分支逐一对应，否则日志里记 500、调用方收到 400，对不上账
         if isinstance(exc, FileNotFoundError):
             code = 409
         elif isinstance(exc, (InvalidInput, ValueError)):
             code = 400
         else:
             code = 500
+        # ⚠️ request_params 必须剔除 samples：内联样本动辄几百 KB，整段塞进调用日志表会把库撑爆
         database.insert_invocation(
             model_id=int(row["ModelID"]), training_id=int(row["TrainingID"]), api_endpoint="/predict",
             request_params={k: v for k, v in body.items() if k != "samples"},
             response_result={"error": f"{type(exc).__name__}: {exc}"},
             duration_ms=None, is_success=False, status_code=code, client_ip=client_ip, status="失败")
+    # 整段日志写入都是"尽力而为"：库连不上、表不存在、字段超长，统统只能吞掉。
+    # 调用方 Predict 会在本函数返回后 re-raise 原始异常，日志里的二次异常绝不能把它盖掉。
     except Exception:                                        # 写日志失败绝不能盖掉原始异常
         pass
 
@@ -616,10 +692,15 @@ class InferenceTaskList(Resource):
     """GET /inference-tasks?limit=N —— 最近推理任务（读库）。"""
 
     def get(self):
+        # 与 /trainings 完全同构：_int 归一 + min(...,200) 夹上限，避免一次拉回整张 InferenceTasks 表
+        # ⚠️ `or 20` 的 falsy 语义同上（limit=0 会被换成 20）；这个写法在 /predict 里是致命的，
+        #    在这里只是"0 条没意义"，所以没有拆开写——看到"两处风格不一致"别顺手统一
+        # ⚠️ 同样地，`_int()` 不在 try 内，?limit=abc 会变成 500 而不是 400（项目没有全局 InvalidInput 处理器）
         limit = min(_int(request.args.get("limit"), 20, "limit") or 20, 200)
         try:
             return {"tasks": database.recent_inference_tasks(limit), "dialect": database.dialect}
         except DBError as exc:
+            # 503 + dialect：库挂了要让前端说"数据库不可用"，而不是显示成"没有推理任务"
             return {"error": str(exc), "dialect": database.dialect}, 503
 
 
@@ -627,12 +708,19 @@ class InferenceTaskDetail(Resource):
     """GET /inference-tasks/<id> —— 单个任务 + 它的 InferenceResults 明细。"""
 
     def get(self, task_id):
+        # ⚠️ 路由是 /inference-tasks/<int:task_id>：Werkzeug 的 int 转换器已经保证进来的是整数，
+        # 非整数路径（/inference-tasks/abc）根本不会进这个方法，会直接 404。
+        # 这里的 _int() 属于防御性统一写法（默认 None 时 DB 查不到自然走下面的 404）
         try:
             task = database.inference_task(_int(task_id, None, "task_id"))
         except DBError as exc:
             return {"error": str(exc)}, 503
         if task is None:
             return {"error": f"InferenceTaskID={task_id} 不存在"}, 404
+        # db.inference_task() 一次把"任务头 + 该任务的全部 InferenceResults 明细"都查好了
+        #（明细挂在返回值的 results 字段，按 ResultID 排序保证每次点开顺序一致）。
+        # ⚠️ 明细**不分页**：一次推理如果写了上千个窗口，这个响应就是上千行；
+        #    前端要自己分页/懒渲染，或者从源头限制一次写入的结果条数
         return task
 
 
@@ -683,34 +771,51 @@ def _safe_model_name(name: str) -> str:
 def _rename_model(old: str, new: str) -> dict:
     """模型改名的**磁盘侧**动作：搬产物目录 + 改 meta.json + 改库里已存的路径。
 
+    改名必须**同步四处**，少一处就出现"找得到一半、找不到另一半"的鬼状态：
+      ① 产物目录      data/models/<老名> → data/models/<新名>
+      ② 各版本 meta    data/models/<新名>/vN/meta.json 里的 model 字段
+      ③ 库里的路径    Trainings.ModelPath / InferenceTasks.InputPath·OutputPath /
+                      ModelDeployments.DeployedPath（实际由 db.rename_model_paths 按前缀 REPLACE）
+      ④ Models 表行   ModelName（本函数**不管**，由调用方接着调 database.update_model(..., new_name=)）
+
     调用顺序（api 里就是这么用的）：先 _rename_model()，再 database.update_model(..., new_name=)；
     搬完目录后改库失败时用 _undo_rename() 搬回去，保证"库表"和"磁盘"不脱钩。
+    **为什么先搬文件再改库**：搬目录是本地同盘 rename，几乎不会失败且失败原因一眼可见；
+    而 update_model 要走网络+SQL（查重、外键、方言差异）。把易失败的放后面，失败时才有东西可回滚；
+    反过来先改库的话，改库成功、搬目录失败，库里全是新路径、磁盘还是老目录，之后所有推理训练都 FileNotFoundError。
     """
     key = _artifact_key(old)                     # 真实目录名（1DCNN → 1dcnn）
     safe = _safe_model_name(new)
     old_dir, new_dir = config.model_dir / key, config.model_dir / safe
-    moved = False
+    moved = False                                # 真搬过目录才置位：没搬过就没什么可回滚的
     if old_dir.is_dir():
+        # ⚠️ 用 exists() 而不是 is_dir()：同名位置被一个普通文件占着也照样不能搬，
+        # 早点报错好过 Windows 上 rename 抛一个语焉不详的异常
         if new_dir.exists():
             raise InvalidInput(f"产物目录 data/models/{safe} 已存在，先删掉它或换个名字")
         old_dir.rename(new_dir)                  # 同一磁盘上的重命名，秒完成
         moved = True
+        # 每个版本一个子目录（v1/v2/...），里面各有一份 meta.json，全部要改
         for meta_file in new_dir.glob("*/meta.json"):
             try:
                 payload = json.loads(meta_file.read_text(encoding="utf-8"))
             except Exception:
-                continue
+                continue                         # 单个 meta 损坏/非 JSON 不能让整次改名失败，跳过继续
             if isinstance(payload, dict):
-                # 目录里的 meta 都归这个模型，直接改写（上传时写的 model 大小写可能和目录名不一致，
-                # 所以不做相等判断，免得 Windows 大小写不敏感时漏改）
+                # ⚠️ 无条件改写，不做 old→new 的相等判断：上传时写进 meta 的 model 大小写可能和目录名
+                # 不一致（比如目录 1dcnn、meta 里写的 1DCNN），而 Windows 文件系统大小写不敏感，
+                # 一比就"看起来相等"从而漏改，于是改名后 meta 里的模型名永远停在老写法上。
                 payload["model"] = safe
                 meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
         paths = database.rename_model_paths(key, safe)   # Trainings.ModelPath 等路径前缀
     except DBError:
+        # 改库失败 → 把目录原样搬回去，宁可整体失败成一个"没改过名"的干净状态，
+        # 也不能留下"库说新名、磁盘是老名"的脱钩（meta 与路径前缀由调用方的 _undo_rename 收尾）
         if moved:
             new_dir.rename(old_dir)
         raise
+    # 返回值原样带在 PUT 响应里（改名与否、目录是否真的搬了、路径改了几行），供前端提示与排错
     return {"from": key, "to": safe, "artifact_dir_moved": moved,
             "artifact_dir": str(new_dir) if moved else None,
             "path_rows_updated": paths,
@@ -719,15 +824,26 @@ def _rename_model(old: str, new: str) -> dict:
 
 
 def _undo_rename(old: str, new: str) -> None:
-    """update_model 失败时回滚 _rename_model 的副作用（目录 + meta + 路径）。"""
+    """update_model 失败时回滚 _rename_model 的副作用（目录 + meta + 路径）。
+
+    这里是**回滚路径**，原则是"尽力恢复、绝不抛异常"：它是在异常处理里被调用的，
+    再抛一个新异常会把真正的失败原因（改库为什么失败）彻底盖掉，且此时 _rename_model
+    已经搬过目录，用户看到的现象会更乱。所以下面所有失败分支都是 return / pass。
+    """
     key = _artifact_key(old)
+    # ⚠️ 这里就地用正则清洗，而不是复用 _safe_model_name()：后者对非法名会 raise InvalidInput，
+    # 回滚路径上不允许再抛异常，清洗不出来就退回原文照搬。
     safe = re.sub(r"[^\w\u4e00-\u9fa5.\-]+", "_", new).strip("._") or new
     old_dir, new_dir = config.model_dir / key, config.model_dir / safe
+    # 三个条件缺一不可：新目录得真的在、老目录不能已被别人占用（占用时宁可不动，避免把人家覆盖掉）、
+    # 清洗后的名字确实和老名字不同（相同就没必要搬）
     if new_dir.is_dir() and not old_dir.exists() and safe != key:
         try:
             new_dir.rename(old_dir)
         except OSError:
+            # 目录都搬不回去，后面改 meta/路径也没有意义，直接放弃整次回滚
             return
+    # 与 _rename_model 对称：目录搬回老名后，各版本 meta 里的 model 也要写回老名
     for meta_file in old_dir.glob("*/meta.json"):
         try:
             payload = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -736,10 +852,14 @@ def _undo_rename(old: str, new: str) -> None:
         if isinstance(payload, dict):
             payload["model"] = key
             meta_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 路径前缀反向改回（rename_model_paths 是 REPLACE 前缀，反向调用即可复原）。
+    # ⚠️ 这步和上面的目录搬回是相互独立的：能走到本函数，就说明 _rename_model 已经完整跑完
+    # （它内部的 rename_model_paths 已经把库里路径改成新前缀了，否则会抛 DBError 而不是走到这），
+    # 所以即使目录因为上面三个条件不满足而没搬回来，路径前缀也必须改回去。
     try:
         database.rename_model_paths(safe, key)
     except DBError:
-        pass
+        pass                                     # 回滚里的失败只能吞掉，别再抛出去盖住原始异常
 
 
 class ArtifactDetail(Resource):
@@ -747,8 +867,11 @@ class ArtifactDetail(Resource):
 
     def get(self, model_name):
         """取产物档案。model_name 允许任意写法（1DCNN / 1dcnn / 上传名），先归一再查。"""
+        # 先过 _artifact_key()：磁盘目录只认小写内部键，1DCNN / 上传名都得换算；
+        # version 缺省（None）时由 load_artifact 自己取最新版本，所以前端不传也能看到档案。
         try:
             artifact = load_artifact(_artifact_key(model_name), request.args.get("version"))
+        # 两个 except 分工不同：产物不存在 → 404（资源不在），版本号写错 → 400（参数不对）
         except FileNotFoundError as exc:
             return {"error": str(exc)}, 404
         except ValueError as exc:
@@ -757,6 +880,8 @@ class ArtifactDetail(Resource):
 
     def delete(self, model_name):
         """删除：?version=vN 删产物版本；?scope=record 删 Models 表登记行（带引用检查）。"""
+        # 两种删除口径必须由调用方**显式选一个**：删的是磁盘产物版本，还是库表登记行？
+        # 猜着删太危险（一个不可恢复、一个带外键引用检查），所以两个都没给就直接报错。
         try:
             version = request.args.get("version")
             scope = (request.args.get("scope") or "").strip()
@@ -782,17 +907,24 @@ class ArtifactDetail(Resource):
         避免出现"库表改名了、磁盘还是老目录"的脱钩状态。
         """
         body = _body()
+        # ⚠️ old 走 _db_model_name()（库表口径，1DCNN）：库里存的是正式名，
+        # 拿路径参数里的 1dcnn 直接去查会查不到行，改名就"成功"地改了个空。
         old = _db_model_name(model_name)
+        # 兼容两种键名：前端 camel 风格的 NewModelName，和脚本里惯用的 new_name
         new_name = str(body.get("NewModelName") or body.get("new_name") or "").strip()
         rename = None
         try:
+            # 名字没变（或没传）就只当普通的信息更新，不碰磁盘
             if new_name and new_name != old:
+                # 查重放在搬目录之前：名字被占直接 409，别先动了磁盘才发现改不了
                 if database.model_exists(new_name):
                     return {"error": f"模型名 {new_name} 已被占用，换一个"}, 409
                 rename = _rename_model(old, new_name)
             try:
                 result = database.update_model(old, body, new_name=new_name or None)
             except Exception:
+                # 目录已经搬过去了、改库却失败 → 用 _undo_rename 把目录/meta/路径前缀搬回老名，
+                # 再原样抛出，让下面的 except 翻译成正确的状态码
                 if rename:
                     _undo_rename(old, new_name)           # 搬完目录但改库失败 → 原样搬回去
                 raise
@@ -817,31 +949,40 @@ class ModelOverview(Resource):
 
     def get(self, model_name):
         """一个模型的完整档案：登记 + 产物参数 + 最近训练 + 引用统计，一次请求给全。"""
+        # name = 库表口径（Models.ModelName）；key = 磁盘口径（小写目录名），
+        # 后者与 _artifact_key() 的算法完全一致，只是因为上面已经算过 name 才就地内联、省一次归一。
         name = _db_model_name(model_name)
         key = next((k for k, v in MODEL_META.items() if v["db_name"].lower() == name.lower()), name.lower())
 
+        # ⚠️ 用 next(..., None) 而不是"查不到就 404"：允许"有产物但没登记"或"登记了还没训练"，
+        # 档案页要能如实展示这种不一致（与 GET /models 刻意返回两份清单是同一个思路）。
         registration = next((r for r in database.models_in_db()
                              if str(r["ModelName"]).lower() == name.lower()), None)
         versions = [a.to_dict() for a in list_artifacts(key)]
         params, metrics, labels, dataset, confusion = {}, {}, None, None, None
         if versions:
+            # versions 是从旧到新排列，所以 [-1] 才是**最新版本**，参数一律取最新那份
             meta = list_artifacts(key)[-1].meta          # 最新版本
             params = meta.get("params") or {}
             metrics = meta.get("metrics") or {}
             labels = meta.get("labels")
             dataset = meta.get("dataset")
             confusion = meta.get("confusion")
+        # 库层没有"按模型名查训练记录"的接口，只能拉最近 50 条再本地过滤，最后只留 5 条给前端
         trainings = [t for t in database.recent_trainings(50)
                      if str(t.get("ModelName", "")).lower() == name.lower()][:5]
         try:
             references = database.model_references(name)
         except DBError as exc:
+            # 引用统计只是附带信息，库出错就降级成 error 字段，不能让整个档案页 500
             references = {"error": str(exc)}
         return {
             "model": name, "artifact_key": key,
             "registration": registration,
             "artifact_versions": versions,
             "latest_version": versions[-1]["version"] if versions else None,
+            # ⚠️ metrics 里剔除 history（逐 epoch 的训练曲线），体积比其它指标大一个量级，
+            # 曲线另有 /figures 的图片可看，档案页不需要它
             "params": params, "metrics": {k: v for k, v in metrics.items() if k != "history"},
             "labels": labels, "dataset": dataset, "confusion": confusion,
             "recent_trainings": trainings,
@@ -1030,15 +1171,25 @@ class ModelCreate(Resource):
 
     def post(self):
         body = _body()
+        # 两种键名都收：ModelName（库表风格，dvadmin 前端用）与 name（简化写法，脚本用）
         name = (body.get("ModelName") or body.get("name") or "").strip()
         if not name:
             return {"error": "ModelName 不能为空"}, 400
+        # ⚠️ 这里**不做** _safe_model_name() 清洗：本接口只往 Models 表插一行、不碰磁盘，
+        # 所以含 `/`、`..` 这种字符的名字也能登记成功；真正要拿名字当目录名的接口
+        #（/models/upload、模型改名）才会做磁盘安全化并把非法字符拒掉。
+        # 默认值写在参数里：ApiEndpoint 缺省 /predict、Status 缺省"未训练"（占位模型还没跑过训练）
         try:
             model_id = database.ensure_model(
                 name, description=body.get("Description"), model_type=body.get("ModelType"),
                 api_endpoint=body.get("ApiEndpoint") or "/predict", status=body.get("Status") or "未训练")
         except DBError as exc:
+            # ⚠️ 注意 db.ensure_model() 是"有就取、没有就建"：**同名并不冲突**，它会直接返回已有的 ModelID，
+            # 下面照样回 201（前端若想提示"已存在"，得自己拿 ModelID 去 /models 对账）。
+            # 能走到这个 409 的是真正失败的情况：并发下两个请求同时插入撞唯一索引、字段超长、库不可用等
             return {"error": str(exc)}, 409
+        # 201 Created，但"登记"不等于"有产物"：本接口不训练、不落盘
+        #（要产物走 POST /models/upload 上传，或 POST /train 训练）
         return {"ModelID": model_id, "ModelName": name}, 201
 
 
@@ -1046,9 +1197,17 @@ class ModelReferences(Resource):
     """GET /models/<model_name>/references —— 删前引用体检：被哪些表引用了多少行。"""
 
     def get(self, model_name):
+        # _db_model_name() 先归一（1dcnn / 中文别名 → Models 表里的正式名 1DCNN）：
+        # 库里存的是正式名，拿磁盘口径的小写名去查会永远查不到行
+        # 返回体形如 {ModelID, references: {表名: 引用行数}, total, deletable}：
+        # deletable = (total == 0)，前端据此决定"删除"按钮能不能直接点，
+        # 还是先提示"被 Trainings/InferenceTasks… 引用着"（引用不为 0 时删登记行会 409，
+        # 必须带 ?force=true 才会连带清理，对应 ArtifactDetail.delete 的 ?scope=record&force=1）
         try:
             return database.model_references(_db_model_name(model_name)), 200
         except DBError as exc:
+            # ⚠️ db 层遇到"这个名字不在 Models 表里"是抛 DBError 的，这里统一映射成 404：
+            # 对调用方来说"模型不存在"属于资源不存在，不是服务故障
             return {"error": str(exc)}, 404
 
 
@@ -1056,21 +1215,32 @@ class DatasetRecord(Resource):
     """GET/PUT/DELETE /datasets/db/<dataset_id> —— 单条 Datasets 记录（查/改/删）。"""
 
     def put(self, dataset_id):
+        # ⚠️ 路由是 <int:dataset_id>，Werkzeug 已经把它转成整数了，这里的 int() 只是防御性写法。
+        # 注意它真要抛 ValueError（非整数）时项目里**没有**全局的 InvalidInput/ValueError 处理器
+        #（InvalidInput 只是 ValueError 的子类），不会被自动翻译成 400，而是直接变成 500。
+        # ⚠️ 也千万别改成 `int(dataset_id) or None` 之类——0 是 falsy，会把主键 0 当成"没传"
         try:
             return database.update_dataset(int(dataset_id), _body()), 200
         except DBError as exc:
+            # 改不动通常是库侧的约束问题（唯一键冲突、字段超长），属于"请求与现状冲突" → 409
             return {"error": str(exc)}, 409
 
     def delete(self, dataset_id):
         """删登记行；被 Trainings/InferenceTasks 引用时默认拒绝，?force=true 才连带清理。"""
+        # ⚠️ force 这类"危险开关"的默认值必须是安全侧：只有明确写 1/true/True 才算开，
+        # 拼错（yes/on/TRUE）一律按"不加 force"处理，宁可让用户重试也别误删引用行
         force = request.args.get("force") in ("1", "true", "True")
         try:
             return database.delete_dataset(int(dataset_id), force=force), 200
         except DBError as exc:
+            # 409 = 还被别的表引用着：先把引用清掉（或显式 force）再来删
             return {"error": str(exc)}, 409
 
     def get(self, dataset_id):
         """取单条 Datasets 记录（没有按主键查的接口，这里在列表里找）。"""
+        # ⚠️ 逐行线性查找，因为 database 层没提供"按 DatasetID 查单行"的函数。
+        # ⚠️ 而且 datasets_in_db() 自带默认 LIMIT 200，所以第 200 条之后的登记行这里**查不到**、
+        #    会误报 404 —— 要让这个接口真正可靠，得在 db 层补一个按主键查询
         for row in database.datasets_in_db():
             if int(row["DatasetID"]) == int(dataset_id):
                 return row, 200
@@ -1084,8 +1254,13 @@ class FigureList(Resource):
         # 先按大 limit 取回来再按 model 过滤，避免"过滤后不足 limit 条"这种别扭语义
         limit = min(_int(request.args.get("limit"), 60, "limit") or 60, 500)
         model = request.args.get("model")
+        # ⚠️ list_figures 内部是"按 mtime 倒序遍历 + 到 limit 就 break"，先截断后过滤会漏：
+        # 某个模型的图可能排在 500 名之后，所以这里固定取满 500 再筛。
+        # 代价是 >500 张图时只看得到最新的 500 张（图库大了要换成按目录筛选）
         items = list_figures(limit=500)
         if model:
+            # 两种命中写法都要支持：file 是相对 FIG_DIR 的路径，可能与 model 同级（"1dcnn/x.png"），
+            # 也可能嵌在子目录里（"runs/1dcnn/x.png"）
             items = [i for i in items if i["file"].startswith(f"{model}/") or f"/{model}/" in i["file"]]
         return {"count": len(items[:limit]), "figures": items[:limit],
                 "hint": "图片可直接用返回的 url 在浏览器打开（GET /figures/<路径>）"}
@@ -1095,6 +1270,11 @@ class FigureFile(Resource):
     """GET /figures/<路径> —— 直接返回 PNG 文件（conditional=True 支持 304 缓存协商）。"""
 
     def get(self, relpath):
+        # 直接把 PNG 交给 Flask 发文件：不用自己 open/read，还能白拿 Content-Length、ETag、
+        # Range 这些头。conditional=True 让它处理 If-None-Match/If-Modified-Since → 命中时回 304，
+        # 前端反复切页不再重复下载整张图。
+        # ⚠️ relpath 直接来自 URL，穿越防护靠 send_from_directory 自己做的 safe_join
+        # （规范化后若逃出 FIG_DIR 会抛 NotFound），所以别改成 Path(FIG_DIR / relpath).read_bytes() 那种写法
         return send_from_directory(FIG_DIR, relpath, conditional=True)
 
 
@@ -1106,6 +1286,7 @@ class Console(Resource):
     """
 
     def get(self):
+        # 每次请求都重新读盘（不缓存在模块变量里），配合下面的 no-store，改完 console.html 刷新即生效
         # no-store：控制台改完刷新就能看到，不用手动清缓存
         html = CONSOLE_HTML.read_text(encoding="utf-8")
         return Response(html, mimetype="text/html", headers={"Cache-Control": "no-store"})
@@ -1115,7 +1296,7 @@ class Root(Resource):
     """GET / —— 根路径直接把人送到控制台，避免 127.0.0.1:5000/ 看到 404。"""
 
     def get(self):
-        return redirect("/ui")
+        return redirect("/ui")                   # 302 到 /ui，前端书签只记一个地址
 
 
 # ============================ 数据集管理 / 数据展示 ============================
@@ -1124,10 +1305,13 @@ class DatasetDb(Resource):
 
     def get(self):
         """列登记记录，顺带把 8 张表的行数一并返回（前端「库表登记」页要用）。"""
+        # 一次请求给两样东西：Datasets 的登记行 + 各表行数（「库表登记」页要一起显示）
         try:
             return {"datasets": database.datasets_in_db(), "dialect": database.dialect,
                     "counts": database.table_counts()}, 200
         except DBError as exc:
+            # ⚠️ 库连不上给 503 而不是 500，并且照样带上 dialect：前端要能显示"配的是 MySQL、但连不上"，
+            # 而不是一个什么都不带的 500 —— 这类故障排查全靠这一句话
             return {"error": str(exc), "dialect": database.dialect}, 503
 
     def post(self):
@@ -1136,6 +1320,8 @@ class DatasetDb(Resource):
         name = (body.get("name") or "").strip()
         if not name:
             return {"error": "name 不能为空"}, 400
+        # 登记是**幂等**的：同名数据集由 register_dataset 决定复用已有行，所以成功有两种状态码——
+        # 201 = 新建，200 = 复用了已有行（响应里的 already_existed 就是判据，前端据此提示"已存在"）
         try:
             result = database.register_dataset(
                 name=name, source=body.get("source"),
@@ -1156,11 +1342,16 @@ class DatasetSignal(Resource):
 
     def get(self):
         """取一段原始信号（已降采样成 points 个数值）。"""
+        # 入参分工：dataset 决定"去哪个目录找"、file 决定"取哪个文件"、points/start 决定"取哪一段"
         dataset = request.args.get("dataset") or ""
         filename = request.args.get("file")
         if not filename:
             return {"error": "缺少 file 参数（数据集文件名）"}, 400
+        # 采样点数两头都要夹：上万个点浏览器画不动，几十个点又看不出波形，所以夹在 200..4000。
+        # ⚠️ 这里用了 `or 1500`（0/None 都会退到默认值）——points=0 本来就没意义，退默认可接受；
+        # 但**别把这个写法照抄到 limit 那种 0 有语义的参数上**（Predict.post 里就专门避开了这个坑）
         points = min(max(_int(request.args.get("points"), 1500, "points") or 1500, 200), 4000)
+        # start 是"从第几个采样点开始取"，负数会让 Python 从尾部数（切出错位窗口），所以夹到 ≥0
         start = max(_int(request.args.get("start"), 0, "start") or 0, 0)
         column = request.args.get("column")
         sheet = request.args.get("sheet")
@@ -1168,10 +1359,13 @@ class DatasetSignal(Resource):
         # 1) 目录来自 dataset 键（内置 CWRU / 上传的表格数据集）
         directory = None
         if dataset in config.dataset_dirs:
+            # 内置 .mat：键就是 CWRU_0HP 这类名字
             directory = config.dataset_dirs[dataset]
         elif dataset.startswith("表格:"):
+            # 上传的表格集：列表页(DatasetList)回的 key 是 "表格:<目录名>"，这里切掉前缀还原成真实目录名
             directory = config.upload_dir / dataset.split(":", 1)[1]
         elif dataset:
+            # 兜底：兼容直接传裸目录名的老调用（按 data/datasets/<名> 找）
             directory = config.upload_dir / dataset
         if directory is not None:
             try:
@@ -1180,26 +1374,34 @@ class DatasetSignal(Resource):
                 directory.resolve().relative_to(config.workspace_dir.resolve())
             except ValueError:
                 return {"error": f"非法的 dataset 参数：{dataset!r}（越出工作区）"}, 400
+            # 先用 Path(filename).name 把 `..\..\secret.csv` 这类相对路径削成纯文件名（第一道），
+            # 拼完再 resolve + 二次 relative_to(directory) 校验（第二道）——两道都得留：
+            # 只靠 name 挡不住绝对路径，只靠 relative_to 又挡不住"目录本身就被指到工作区外"
             path = (directory / Path(filename).name).resolve()
             try:
                 path.relative_to(directory.resolve())
             except ValueError:
                 return {"error": f"文件不在该数据集目录内：{filename}"}, 400
         else:                                   # 2) 直接给工作区内的相对/绝对路径
+            # dataset 为空：当成"给我工作区里的某个路径"，交给公共解析器（自带穿越防护与两级回退）
             try:
                 path = _resolve_workspace_path(filename)
             except InvalidInput as exc:
                 return {"error": str(exc)}, 400
         if not path.is_file():
+            # 404 且只回报文件名：这里本来就没打算把绝对路径告诉调用方（响应出口还有一层脱敏兜底）
             return {"error": f"文件不存在：{path.name}"}, 404
 
         try:
             if tabular.is_table(path):
+                # 表格：一列就是一段信号（column/sheet 由前端下拉选），标签直接用文件名推
                 signal = tabular.read_signal(path, column=column, sheet=sheet)
                 label = tabular.label_from_filename(path.name)
                 class_id = None
                 kind = "tabular"
             else:
+                # .mat：读 CWRU 的 DE 通道，再拿文件名去 10 类表反查类别 ID
+                # （反查不到就只保留 guess_label 的猜测标签、class_id 留 None，这不算错误）
                 signal = ds.read_de_channel(path)
                 label, class_id, kind = ds.guess_label(path.name), None, "matlab"
                 for fname, cid, lab in ds.CWRU_0HP_CLASSES:
@@ -1207,11 +1409,16 @@ class DatasetSignal(Resource):
                         label, class_id = lab, cid
                         break
         except Exception as exc:
+            # 文件损坏、列名对不上、不是数值列……统一算"读不出来"：给 500 但带上原始异常类型，便于定位
             return {"error": f"读取信号失败：{type(exc).__name__}: {exc}"}, 500
 
+        # 降采样分两步：stride = 总长//目标点数，保证"等间隔抽到的点数 ≥ points"，
+        # 再 [:points] 截断成正好 points 个——比精确算步长再处理边界小数简单得多
         segment = signal[start:]
         stride = max(1, segment.size // points)
         values = segment[::stride][:points]
+        # min/max/mean/std 都按**降采样后**的 values 算（不是整段原始信号）：前端画的正是这些点，
+        # 统计口径必须和图一致，否则会出现"波形看着很平、均值却很大"。round 到 5 位是给 JSON 瘦身
         return {
             "dataset": dataset or None, "file": path.name, "file_path": str(path),
             "dataset_type": kind, "label": label, "class_id": class_id, "column": column, "sheet": sheet,
@@ -1228,6 +1435,8 @@ class SystemInfo(Resource):
     """GET /system —— 运行信息：Python/平台、关键依赖版本、路径、库表行数、产物/图/日志 占用。"""
 
     def get(self):
+        # 内部小工具：某个包读不到版本不能让整个 /system 500 —— 没安装算 None（前端显示"未安装"），
+        # 其它异常退化成"读取失败"（安装元数据损坏之类，属于"知道有问题但不致命"）
         def dist_version(name):
             """查已安装包的版本；没装返回 None（前端显示"未安装"）。"""
             try:
@@ -1237,14 +1446,20 @@ class SystemInfo(Resource):
             except Exception:                                            # pragma: no cover
                 return "读取失败"
 
+        # 三块"占用统计"：产物 / 图 / 日志。产物只算权重文件的大小（meta、scaler 都是小文件，
+        # 而 a.weights 才是"这个模型有多大"的答案）；图和日志则是目录里所有文件的字节数之和
         artifacts = list_artifacts()
         figure_items = list_figures(limit=1000)
         logs = list(config.log_dir.glob("*.log"))
+        # ⚠️ 只有数据库这一块允许"失败也继续"：ok=False 与 error 一起回，/system 页面照样能看到
+        # 路径、依赖版本、产物占用——排查"库为什么连不上"时恰恰最需要这些，不能因为库挂了整页空白
         try:
             counts, db_ok = database.table_counts(), True
         except DBError as exc:
             counts, db_ok = {"error": str(exc)}, False
         return {
+            # 这是"本机自检"页，runtime/packages/paths 给的就是真实环境值；路径的脱敏在响应出口
+            # 由 _install_path_mask() 统一兜（绝对路径会被换成 <工作区>/<本机> 之类的占位符）
             "runtime": {"python": sys.version.split()[0], "executable": sys.executable,
                         "platform": platform.platform(), "machine": platform.machine()},
             "packages": {name: dist_version(name) for name in _PACKAGES},
@@ -1267,7 +1482,9 @@ class SystemLogs(Resource):
     """GET /system/logs —— 训练日志文件列表（按修改时间倒序）。"""
 
     def get(self):
+        # 倒序 = 最近写的日志排最前，前端下拉默认就落在"最近一次训练"上
         files = sorted(config.log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # 只 stat 不读内容：日志动辄几十 MB，列表页只需要名字/大小/时间，读进来纯属浪费内存
         return {"dir": str(config.log_dir), "count": len(files), "logs": [
             {"name": p.name, "size_kb": round(p.stat().st_size / 1024, 1),
              "modified": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")}
@@ -1284,8 +1501,11 @@ class SystemLogFile(Resource):
         path = config.log_dir / name
         if not path.is_file():
             return {"error": f"日志不存在：{name}"}, 404
+        # 尾部行数夹在 10..3000：1 行查不出问题，把整个日志丢给浏览器又会卡死
         tail = min(max(_int(request.args.get("tail"), 300, "tail") or 300, 10), 3000)
-        # Keras 进度条写进日志的 ANSI 转义序列在浏览器里是乱码，这里统一剥掉
+        # Keras 进度条写进日志的 ANSI 转义序列在浏览器里是乱码，这里统一剥掉。
+        # ⚠️ errors="replace" 不能省：日志里混进 GBK 输出或二进制碎片时，严格解码会抛
+        # UnicodeDecodeError 把整个接口打成 500；rstrip() 顺手吃掉 Windows 的 \r，否则前端显示空行
         lines = [_ANSI.sub("", ln).rstrip()
                  for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()]
         return {"name": name, "size_kb": round(path.stat().st_size / 1024, 1),
@@ -1296,8 +1516,12 @@ class Maintenance(Resource):
     """POST /system/maintenance —— 维护操作（危险，前端红按钮 + 二次确认）。"""
 
     def post(self):
+        # ⚠️ 白名单式分发：只有下面**显式写出来**的 target 才会被执行，绝不按字符串去拼函数名。
+        # 新增维护动作时必须同时改这里的 if 和返回里的 supported 列表，
+        # 否则前端会拿到"支持这个动作、却回 400"的矛盾提示
         target = (_body().get("target") or "").strip()
         if target == "figures":
+            # 目前唯一的动作：清空图库（只删 data/figures 下的 png，不动模型产物、不动库表）
             return clear_figures(), 200
         # 白名单式：只认已知的 target，别的明确报错并回可选值
         return {"error": f"不支持的维护目标：{target!r}", "supported": ["figures"]}, 400
@@ -1305,10 +1529,14 @@ class Maintenance(Resource):
 
 def register_api(api) -> None:
     """把资源挂到 flask_restful.Api 上（由 main.py 调用）。"""
+    # 基础页：/ 与 /ui 是同一张控制台；/api 是自描述清单（人/脚本查有哪些接口）；/health 给探活用
     api.add_resource(Root, "/")
     api.add_resource(Console, "/ui")
     api.add_resource(ApiIndex, "/api")
     api.add_resource(Health, "/health")
+    # ⚠️ `/models` 注册了两次是**故意的**：ModelList 只实现 GET、ModelCreate 只实现 POST，
+    # flask-restful 按 HTTP 方法分发，两者不冲突。以后再加同 URL 的资源类，先确认方法不重叠
+    # （同一路径同一方法被两个资源类实现属于未定义行为，别赌哪个赢）
     api.add_resource(ModelList, "/models")
     api.add_resource(DatasetList, "/datasets")
     api.add_resource(Train, "/train")
@@ -1316,6 +1544,10 @@ def register_api(api) -> None:
     api.add_resource(Predict, "/predict")
     api.add_resource(InferenceTaskList, "/inference-tasks")
     api.add_resource(InferenceTaskDetail, "/inference-tasks/<int:task_id>")
+    # ⚠️ 这三条是"变量段 + 静态段"混用（/models/<model_name>、/models/upload、
+    # /models/<model_name>/references）：静态段更具体的规则必须能先命中，否则 /models/upload
+    # 会被当成 model_name='upload' 丢给 ArtifactDetail，上传接口直接 404/400。
+    # 改动这里的路径写法（例如把 <model_name> 换成 <path:...>）后，务必实测 /models/upload 仍走 ModelUpload
     api.add_resource(ArtifactDetail, "/models/<model_name>")
     api.add_resource(ModelCreate, "/models")
     api.add_resource(ModelUpload, "/models/upload")
@@ -1323,6 +1555,7 @@ def register_api(api) -> None:
     api.add_resource(ModelOverview, "/models/<model_name>/overview")
     api.add_resource(DatasetRecord, "/datasets/db/<int:dataset_id>")
     api.add_resource(FigureList, "/figures")
+    # path: 转换器（而不是 string/默认）才能带子目录：图的路径形如 1dcnn/v1/xxx.png
     api.add_resource(FigureFile, "/figures/<path:relpath>")
     # 数据集管理 / 数据展示
     api.add_resource(DatasetDb, "/datasets/db")
@@ -1335,10 +1568,14 @@ def register_api(api) -> None:
     api.add_resource(SystemLogFile, "/system/logs/<name>")
     api.add_resource(Maintenance, "/system/maintenance")
 
+    # ⚠️ 收尾必须调用它：脱敏挂在 app.after_request 上，跟资源注册顺序无关，
+    # 但放在这里能保证"谁用 register_api 谁就自动带上出口脱敏"——漏挂一次，所有响应都在裸奔真实路径。
+    # 注意这里传的是 flask_restful.Api 对象本身（_install_path_mask 内部自己取 api.app）
     _install_path_mask(api)          # 出口脱敏：响应里不再出现本机真实目录
 
 
 # ============================================ 响应脱敏：不把本机真实目录暴露给前端
+# 只认"盘符 + 冒号 + 分隔符"（C:\ / d:/）：单字母能对上真实盘符，又能避开 http:// 这种多字母 scheme
 _DRIVE_RE = re.compile(r"[A-Za-z]:[\\/]")
 
 
@@ -1359,18 +1596,27 @@ def mask_private_paths(payload, workspace: str = "", home: str = ""):
     """
     def fix(text: str) -> str:
         """把一段文本里出现的本机绝对路径换成占位符标签。"""
+        # 整串正好等于工作区/用户目录时单独处理：走下面的前缀替换会得到空字符串，
+        # 前端会显示成一个空字段（看起来像"没数据"），不如明确给个占位标签
         if workspace and text == workspace:
             return "<工作区>"
         if home and text == home:
             return "<用户目录>"
+        # 先工作区、后用户目录：工作区命中的目标是"换成相对工作区的相对路径"（前端要回传这个口径，
+        # 所以 label 是空串），用户目录只是兜底遮蔽成 <用户目录>——工作区放前面才不会被兜底规则先吃掉。
+        # 且 \\ 与 / 两种分隔符都要试：同一个路径在不同接口里两种写法都存在；
+        # 最后那个不带分隔符的 replace 兜"裸目录名"（文本正好以目录名结尾、后面没有分隔符的情况）
         for raw, label in ((workspace, ""), (home, "<用户目录>")):
             if raw:
                 text = text.replace(raw + "\\", label).replace(raw + "/", label).replace(raw, label)
+        # 工作区之外的其它盘符统一换成 <本机>/，保留目录结构（只藏机器信息，不丢可读性）。
         # 用 lambda 而不是字符串模板：替换串以反斜杠结尾会让 re.sub 抛 "bad escape (end of pattern)"
         return _DRIVE_RE.sub(lambda _match: "<本机>/", text)
 
     def walk(node):
         """递归遍历 JSON 结构，对每个字符串套 fix()；容器原样重建，其它类型不动。"""
+        # 容器一律**重建**而不是就地改：响应对象可能还被别处引用，就地改会连带污染原数据；
+        # tuple 也重建为 list —— JSON 序列化出来本来都是数组，形状不变。数字/布尔/None 原样放行
         if isinstance(node, str):
             return fix(node)
         if isinstance(node, dict):
@@ -1384,22 +1630,33 @@ def mask_private_paths(payload, workspace: str = "", home: str = ""):
 
 def _install_path_mask(api) -> None:
     """给 Flask app 挂一个 after_request：只处理 JSON 响应，图片/日志/SSE 原样放行。"""
+    # flask_restful.Api 把 Flask app 挂在 .app 上；取不到（例如测试里塞了个假 api）就直接跳过，
+    # 不要为了脱敏把注册流程搞崩
     app = getattr(api, "app", None)
     if app is None:                                              # pragma: no cover
         return
+    # 这两个前缀在注册时算一次就够：after_request 每次响应都会跑，别在里面重复做 Path.home()
     workspace, home = str(config.workspace_dir), str(Path.home())
 
     @app.after_request
     def _mask_response(response):                                # noqa: ANN001
         """出口统一兜一遍脱敏，避免逐个字段改还漏掉。"""
+        # ⚠️ 只碰 JSON 和 text/*，其它一律原样放行：
+        #   · /figures/<路径> 返回的是 PNG 二进制，get_data(as_text=True) 会把字节解码坏（图片直接花掉）；
+        #   · text/event-stream 是流式响应（SSE），set_data() 会把"流"截断成一次性响应。
+        # 放在**出口**做而不是逐个字段改，是因为路径散落在 30 多个字段里
+        # （directory/weights/dataset.path/log_file/input_path/报错信息……），逐个改必然漏
         mimetype = response.mimetype or ""
         if mimetype == "application/json":
             try:
                 payload = json.loads(response.get_data(as_text=True) or "null")
             except Exception:                                    # 不是合法 JSON 就别动它
+                # 解析不了（自拼的 JSON 片段、空 body）就原样放行：宁可漏一次脱敏，也不能把响应改坏
                 return response
+            # ensure_ascii=False 保住中文；重新 set_data 后 Content-Length 由 Flask 自己重算
             response.set_data(json.dumps(mask_private_paths(payload, workspace, home), ensure_ascii=False))
         elif mimetype.startswith("text/") and mimetype != "text/event-stream":
             # 日志尾部（/system/logs/<名>）里也有绝对路径，一起脱敏
             response.set_data(mask_private_paths(response.get_data(as_text=True), workspace, home))
+        # ⚠️ 每个分支都必须返回 response：after_request 返回 None 会让后续处理拿到 None 响应直接崩
         return response

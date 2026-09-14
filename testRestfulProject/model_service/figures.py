@@ -7,12 +7,26 @@
   * 这里统一用 Agg 后端 + `savefig` 落盘，Flask 跑在无显示环境也能出图，
     图放在 data/figures/<模型>/<版本>/ 下，可通过 GET /figures/<路径> 直接看。
 
+⚠️ 为什么必须走**无头后端**（Agg，见 `_pyplot()`）：
+   服务器上没有显示器。matplotlib 默认后端会去找显示服务并尝试弹窗，后果是
+   "连不上就抛异常 / 连得上就弹个窗口把进程挂住"，两种在服务端都是事故。
+   Agg 是纯文件渲染，只往磁盘写 PNG，不需要任何显示环境 —— 这也是本模块能
+   被 Flask 请求线程直接调用的前提。
+
+⚠️ 图是**磁盘产物**而不是内存对象：
+   早期版本图只存在内存里（甚至只 `plt.show()` 弹一下），进程一退出、函数一返回
+   图就没了，既没法返回给接口、也没法事后复查；现在每张图都写进
+   `data/figures/<模型>/<版本>/`，服务重启后仍能通过 GET /figures/<相对路径> 打开
+   （代价是要自己管磁盘，见文件末尾的 `clear_figures()`）。
+
 生成内容：
   训练后  training_curves.png（准确率/损失）、confusion_matrix.png（混淆矩阵）、
           per_class_metrics.png（每类 P/R/F1）
   推理后  prediction_distribution.png（预测分布）、predicted_windows.png（窗口波形 + 预测标签）
 
-出图失败一律不影响训练/推理主流程：函数内部捕获异常并返回 error 文本。
+出图失败一律不影响训练/推理主流程：两个入口函数内部整段 try，异常转成 error 文本返回；
+调用方（training.py / inference.py）只是把它记进结果的 `figures_error` 字段，
+绝不因为"图没画出来"就让训练或推理本身判为失败 —— 图只是结论的补充说明，不是结论本身。
 """
 
 from __future__ import annotations
@@ -24,8 +38,10 @@ from pathlib import Path
 
 from .config import config
 
-# matplotlib 要在 import pyplot 之前设好后端与缓存目录：
-# 缓存目录默认在用户目录下（受限环境可能不可写），统一挪到项目内 data/.cache。
+# ⚠️ 缓存目录必须在**第一次 import matplotlib 之前**通过环境变量指定（之后改无效）：
+# matplotlib 默认把字体缓存写到用户目录，受限环境（沙箱 / 只读 HOME）下不可写会报警甚至失败；
+# 统一挪到项目内 data/.cache/matplotlib，缓存也就跟着项目一起清理。
+# 后端（Agg）则在 `_pyplot()` 里设置 —— 同样要求早于 pyplot 的导入。
 os.environ.setdefault("MPLCONFIGDIR", str(config.data_dir / ".cache" / "matplotlib"))
 
 FIG_DIR = config.data_dir / "figures"
@@ -41,16 +57,20 @@ def _pyplot():
     global _plt, _style_ready
     if _plt is None:
         import matplotlib
-        matplotlib.use("Agg")                      # 无头：不弹窗、不需要显示服务
+        # ⚠️ 必须在 `import matplotlib.pyplot` **之前**切换后端：pyplot 一旦被导入就把
+        # 后端定死，之后再 use() 轻则告警、重则无效，于是又回到"弹窗/连显示服务"的老路。
+        matplotlib.use("Agg")                      # 无头：服务器上没有显示器，只写文件
         import matplotlib.pyplot as plt
         from matplotlib import font_manager
 
-        # 只挂系统里**真的存在**的中文字体：硬写一个不存在的字体名，
-        # matplotlib 会静默回落到方框，图上的中文全变成"豆腐块"
+        # ⚠️ 中文字体必须**显式指定**（SimHei / Microsoft YaHei 等）：matplotlib 自带的
+        # DejaVu Sans 没有汉字字形，缺字形时它**不报错**，只是把每个汉字画成一个方框
+        # （"豆腐块"），很容易被误当成前端/编码问题去查。
+        # 而且只能挂系统里**真的存在**的字体：硬写一个不存在的名字，同样会静默回落成方框。
         available = {f.name for f in font_manager.fontManager.ttflist}
         cjk = [f for f in _CJK_FONTS if f in available]
-        plt.rcParams["font.sans-serif"] = cjk + ["DejaVu Sans"]
-        plt.rcParams["axes.unicode_minus"] = False  # 负号正常显示
+        plt.rcParams["font.sans-serif"] = cjk + ["DejaVu Sans"]  # 退路：至少让数字/英文正常
+        plt.rcParams["axes.unicode_minus"] = False  # 负号正常显示（中文字体里 − 常缺字形）
         plt.rcParams["figure.facecolor"] = "white"
         plt.rcParams["savefig.facecolor"] = "white"
         plt.rcParams["axes.grid"] = True
@@ -83,7 +103,13 @@ def _short_labels(labels: list[str]) -> list[str]:
 
 
 def _save(fig, path: Path) -> dict:
-    """落盘一张图并关掉它（不 close 会累积内存），返回带可直接访问 url 的条目。"""
+    """落盘一张图并关掉它（不 close 会累积内存），返回带可直接访问 url 的条目。
+
+    ⚠️ 必须 `close(fig)`：pyplot 会把所有 figure 挂在全局状态里，一个训练请求画三张图、
+    多来几次就把内存吃满；图已经写进磁盘，内存里那份没有保留价值。
+    url 用 `/figures/<相对路径>` 且统一正斜杠 —— 它是直接给前端 `<img src>` 用的，
+    Windows 的 `\\` 在 URL 里是非法字符。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, bbox_inches="tight", dpi=120)
     _pyplot().close(fig)
@@ -94,7 +120,12 @@ def _save(fig, path: Path) -> dict:
 
 # ------------------------------------------------------------------ 训练期出图
 def training_figures(model: str, version: str, meta: dict, extra: dict | None = None) -> dict:
-    """生成训练期三张图，返回 {"figures": [...], "dir": ..., "error": ...}"""
+    """生成训练期三张图，返回 {"figures": [...], "dir": ..., "error": ...}
+
+    契约：**本函数不抛异常**（整段 try），失败时把错误塞进 error 返回。
+    调用方只把 error 记成 `figures_error`，训练是否成功完全由指标决定 ——
+    ⚠️ 出图依赖字体、matplotlib、磁盘权限等一堆训练用不到的东西，不该让它们左右结论。
+    """
     extra = extra or {}
     target = FIG_DIR / model / version
     figures: list[dict] = []
@@ -177,7 +208,12 @@ def training_figures(model: str, version: str, meta: dict, extra: dict | None = 
 
 # ------------------------------------------------------------------ 推理期出图
 def inference_figures(model: str, version: str, payload: dict, matrix=None) -> dict:
-    """生成推理期两张图：预测分布 + 预测窗口波形（最多 6 个窗口）。"""
+    """生成推理期两张图：预测分布 + 预测窗口波形（最多 6 个窗口）。
+
+    与训练期同样**不抛异常**，失败只写进 error（调用方记 `figures_error`）。
+    落盘目录额外带 `predict-<时间戳>` 一层：同一份模型会被反复推理，
+    每次都覆盖同名文件的话，历史留痕就没了。
+    """
     target = FIG_DIR / model / version / f"predict-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     figures: list[dict] = []
     try:
@@ -225,6 +261,12 @@ def inference_figures(model: str, version: str, payload: dict, matrix=None) -> d
                         title += "  命中" if hit else "  未命中"
                         ax.set_facecolor("#eafaf1" if hit else "#fdedec")
                 else:
+                    # ⚠️ 措辞过时（保留原话以免前端/截图对不上）：
+                    # "异常点占比"是**老格式产物**的说法 —— 那时 anomaly_score 取的是
+                    # 点级 detect 中被标记点的比例（flags.mean()），确实是"占比"；
+                    # 但新格式产物（PcaAD transform）里同一个字段存的是**重构误差**
+                    # （越大越异常，inference.py 的 detail 里就叫"重构误差"），不是百分比。
+                    # 所以图上这个数字只当"异常分数"看，别解读成"异常点占多少百分比"。
                     title = (f"窗口{pred['index']} → {pred['predicted_label']}"
                              f"（异常点占比 {pred['anomaly_score']:.3f}）")
                     ax.set_facecolor("#fdedec" if pred["is_anomaly"] else "#eafaf1")

@@ -3,18 +3,21 @@
 
 所有可变项都走环境变量，代码里只留「本机开发默认值」：
 
-    MODEL_DB_DIALECT    sqlite | mysql | sqlserver        （默认 sqlite）
+    MODEL_DB_DIALECT    目前**只接受 mysql**（写别的值会直接抛 RuntimeError）
     MODEL_DB_HOST       默认 127.0.0.1
-    MODEL_DB_PORT       默认 3306（mysql）/ 1433（sqlserver）
+    MODEL_DB_PORT       默认 3306
     MODEL_DB_USER       默认 root
-    MODEL_DB_PASSWORD   默认空
+    MODEL_DB_PASSWORD   默认空（本机开发用；生产请放 db.env，不要提交进仓库）
     MODEL_DB_NAME       默认 model_management
-    MODEL_DB_ODBC_DRIVER  SQL Server 用，默认 "ODBC Driver 18 for SQL Server"
-    MODEL_DB_TRUSTED     SQL Server 用 Windows 信任连接时设 1
 
-默认走 sqlite 是刻意的：项目里没有任何数据库连接代码、也没有依赖清单，
-先让「训练→推理」这条链在零配置下可验证；要接真库只改环境变量即可，
-表结构直接复用 sql/schema_mysql.sql、sql/schema.sql。
+⚠️ 下面两个变量是历史遗留：早期支持过 SQL Server，现在**代码里已经没有任何地方读它们**
+   （db.py 的方言分支也已收敛到 MySQL）。保留在文档里只为说明"别再用它们配库"：
+    MODEL_DB_ODBC_DRIVER  SQL Server 用（已废弃）
+    MODEL_DB_TRUSTED     SQL Server Windows 信任连接用（已废弃）
+
+项目曾经"没装库也能跑"，靠 sqlite 兜底、并分叉出 sqlserver 分支；结果三套方言各自演化
+（占位符 `%s`/`?`、TOP/LIMIT、建表语句），踩了不少坑，现已统一到 MySQL：
+模型产物与图仍然落在文件系统上，数据库只负责索引/元数据，表结构见 sql/schema_mysql.sql。
 """
 
 from __future__ import annotations
@@ -32,6 +35,8 @@ MODEL_DIR = DATA_DIR / "models"             # 模型产物（对应图里的「P
 LOG_DIR = DATA_DIR / "logs"                 # 训练日志
 UPLOAD_DIR = DATA_DIR / "datasets"          # 上传/存放的表格数据集（一个子目录 = 一个数据集）
 SQL_DIR = PROJECT_DIR / "sql"
+# ⚠️ 遗留常量：sqlite 兜底已废弃（见 __init__ 里"只支持 MySQL"的校验），
+# 本常量现在没有任何地方引用，仅作历史痕迹保留。
 SQLITE_PATH = DATA_DIR / "model_management.db"
 
 # 内置的 CWRU .mat 数据集：键是前端/接口里用的数据集名，值是磁盘目录
@@ -51,6 +56,10 @@ def load_env_file() -> str | None:
 
     格式为 `KEY=VALUE`（# 开头为注释），只在不与已有环境变量冲突时生效，
     这样开发时不用每次都 export 一串 MODEL_DB_*。已存在同名环境变量则以环境变量为准。
+
+    ⚠️ 优先级刻意设计成「真实环境变量 > db.env」：db.env 只是本机开发的便捷默认值，
+    部署时用环境变量覆盖它即可，不必去改文件（也避免把账号密码提交进仓库）。
+    返回值是"实际加载到的文件路径"，只会用于 /health 展示 —— 文件不存在或一行都没生效时回 None。
     """
     path = PROJECT_DIR / "db.env"
     if not path.is_file():
@@ -102,7 +111,11 @@ TEMP_DIR = ensure_writable_tempdir()
 
 
 def _env(name: str, default: str | None = None) -> str | None:
-    """读环境变量；空字符串按"没设"处理（否则 MODEL_DB_PASSWORD= 会被当成真的是空密码）。"""
+    """读环境变量；空字符串按"没设"处理（否则 MODEL_DB_PASSWORD= 会被当成真的是空密码）。
+
+    这里就是"环境变量与默认值"的唯一入口：调用处统一写成 `_env("MODEL_DB_XXX", 本机默认值)`，
+    所以默认值只有一处定义，改默认值不会漏。
+    """
     v = os.getenv(name)
     return v if v not in (None, "") else default
 
@@ -126,18 +139,27 @@ class Config:
         # 本项目**只支持 MySQL**：早期为了"没装库也能跑"写过 SQLite 兜底与 SQL Server 分支，
         # 结果是三套方言各自演化、埋了不少坑（占位符、TOP/LIMIT、建表语句）。现在统一到 MySQL，
         # 别的取值直接报错，免得有人配错了却"看起来能跑"。
+        # ⚠️ 报错信息里带上收到的取值与 db.env 位置：这个异常是在 import 期抛的，
+        # 不指路的话使用者只能看到一个莫名其妙的启动失败。
         self.db_dialect = (_env("MODEL_DB_DIALECT", "mysql") or "mysql").lower()
         if self.db_dialect != "mysql":
             raise RuntimeError(f"本项目只支持 MySQL（MODEL_DB_DIALECT=mysql），收到 {self.db_dialect!r}；"
                                f"请检查 testRestfulProject/db.env")
-        # 连接参数（MySQL 默认端口 3306；账号密码放 db.env，不入库）
+        # 连接参数（MySQL 默认端口 3306；账号密码放 db.env，不入库）。
+        # ⚠️ 这些默认值是**本机开发**用的（127.0.0.1 / root / 空口令），只能在开发机上成立；
+        # 换机器或部署务必用环境变量或 db.env 覆盖。
         self.db_host = _env("MODEL_DB_HOST", "127.0.0.1")
         self.db_user = _env("MODEL_DB_USER", "root")
         self.db_password = _env("MODEL_DB_PASSWORD", "")
         self.db_name = _env("MODEL_DB_NAME", "model_management")
         self.db_port = int(_env("MODEL_DB_PORT", "3306") or "3306")
 
-        # 训练/推理默认超参，分别沿用两个脚本原有的取值，保证与既有实验可比
+        # 训练/推理默认超参，分别沿用各模型脚本原有的取值，保证与既有实验可比
+        # （1dcnn / cwt_cnn / adtk 三套，数值与 training.py 各分支里的内联默认值一致）。
+        # ⚠️ 已知冗余：这个字典**目前没有任何地方引用**（全项目只有本行赋值），
+        # 运行时真正的默认值写在 training.py 里，形式是 `opts.get("epochs", 10)` 这类内联字面量，
+        # 两边的数值**必须人工保持一致**。改默认超参时请改 training.py（那才是生效的那份），
+        # 这里的字典只当"参数默认值速查表"用。
         self.defaults = {
             "1dcnn": {
                 "dataset": "CWRU-0HP", "length": 784, "number": 600, "stride": 150,
@@ -159,17 +181,23 @@ class Config:
 
     # ---- 便于 /health 与日志展示 ----
     def describe(self) -> dict:
-        """给 /health 与前端「运行信息」用的配置摘要。
+        """给 /health 与前端「运行信息」用的配置摘要（只读快照，不含密码）。
 
-        数据库连接信息（只用 MySQL；账号密码放 db.env，不入库）。
+        数据库只可能是 MySQL（`__init__` 里已保证），所以这里的 db 块实际就是
+        "dialect / 主机 / 端口 / 库名"四项；账号密码放 db.env，**刻意不返回**。
         """
         return {
             "project_dir": str(self.project_dir),
             "model_dir": str(self.model_dir),
-            "temp_dir": TEMP_DIR,
-            "env_file": ENV_FILE,
+            "temp_dir": TEMP_DIR,                 # 探测后真正生效的临时目录（可能是 data/tmp）
+            "env_file": ENV_FILE,                 # None = 没有 db.env 或一行都没生效
             "db": {
                 "dialect": self.db_dialect,
+                # ⚠️ 下面三行的 `!= "sqlite"` 三元是老代码留下的**死分支**：
+                # self.db_dialect 只能是 mysql（别的取值在 __init__ 就抛错），所以判断恒为真、
+                # else 分支永远走不到。而且 else 里引用的 `self.sqlite_path` 在本类里根本不存在
+                # （模块级常量叫 SQLITE_PATH，没挂到实例上），一旦哪天放开 sqlite 这里会直接
+                # AttributeError。现在保留原样只为不改行为，不要照着它去"补" sqlite 支持。
                 "host": self.db_host if self.db_dialect != "sqlite" else None,
                 "port": self.db_port if self.db_dialect != "sqlite" else None,
                 "database": self.db_name if self.db_dialect != "sqlite" else str(self.sqlite_path),

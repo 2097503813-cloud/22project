@@ -192,13 +192,21 @@ def probe_weight(filename: str, blob: bytes) -> dict:
 
 
 def _body() -> dict:
-    """请求体 JSON；不是对象（或压根不是 JSON）时返回空 dict，避免调用方到处判 None。"""
+    """请求体 JSON；不是对象（或压根不是 JSON）时返回空 dict，避免调用方到处判 None。
+
+    用 `silent=True` 是刻意的：前端有些请求是 form-data 或不带 body，
+    这时不该直接 400，而应让接口用参数默认值继续跑。
+    """
     data = request.get_json(silent=True)
     return data if isinstance(data, dict) else {}
 
 
 def _int(value, default=None, name="参数"):
-    """取整数参数：None 用默认值，转不动就抛 InvalidInput（接口据此回 400）。"""
+    """取整数参数：None 用默认值，转不动就抛 InvalidInput（接口据此回 400）。
+
+    ⚠️ 调用方**不要**写成 `_int(x, 0, "y") or 0`：0 是 falsy，会把用户明确传的 0
+    悄悄换成别的值 —— `/predict` 的 `limit=0` 曾因此绕过范围校验。
+    """
     if value is None:
         return default
     try:
@@ -208,22 +216,26 @@ def _int(value, default=None, name="参数"):
 
 
 def _resolve_workspace_path(raw: str) -> Path:
-    """把用户给的路径解析成工作区内的文件。
+    """把用户给的路径解析成**工作区内**的文件（`/datasets/table`、`/datasets/signal` 用它）。
 
-    相对路径先按工作区（D:\\22project）试，再按项目目录（testRestfulProject）试，
-    这样 `data/datasets/x.csv` 与 `testRestfulProject/data/datasets/x.csv` 都能用；
-    最终路径必须落在工作区内，挡掉路径穿越。
+    两级回退：相对路径先按工作区（D:\\22project）试，再按项目目录（testRestfulProject）试，
+    所以 `data/datasets/x.csv` 与 `testRestfulProject/data/datasets/x.csv` 两种写法都能用。
+
+    安全：候选路径必须满足 `relative_to(workspace)`，用的是 Path 语义而**不是字符串
+    startswith** —— 否则 `D:\\22project_evil\\x` 这类同前缀目录会绕过检查（历史上真踩过）。
+    最终找不到就抛 InvalidInput(400)，而不是把原始路径回显出去让人猜。
     """
     candidate = Path(raw)
+    # 绝对路径只有一次机会；相对路径两个基准各试一次（工作区优先）
     tries = [candidate] if candidate.is_absolute() else \
         [config.workspace_dir / candidate, config.project_dir / candidate]
     for path in tries:
         resolved = path.resolve()
         try:
-            resolved.relative_to(config.workspace_dir.resolve())
+            resolved.relative_to(config.workspace_dir.resolve())    # 越界 → 换下一个候选
         except ValueError:
             continue
-        if resolved.is_file():
+        if resolved.is_file():            # 目录不算命中，必须是指到文件
             return resolved
     raise InvalidInput(f"文件不存在或不在工作区内：{raw}")
 

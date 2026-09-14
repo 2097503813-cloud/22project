@@ -25,6 +25,11 @@ testRestfulProject/data/.tmpcheck/
 data/logs/
 data/figures/
 
+# 旧版本产物的归档（去掉版本号时由 registry.archive_legacy_versions() 搬进去的）。
+# 刻意不入库：它们只是"本地留个底、不删"，不属于项目布局的一部分；
+# data/models/ 下的**当前**产物仍然入库，保证克隆下来就有可用的模型。
+testRestfulProject/data/archive/
+
 # ---------------- 暂时挪走的 dvadmin 无用代码 ----------------
 # 见 项目技术详解.md §8：想恢复就把它移回 frontend/22project/src/
 _unused_dvadmin/

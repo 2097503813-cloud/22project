@@ -2,7 +2,7 @@
   "model": "1dcnn",
   "framework": "tensorflow-keras",
   "task": "classification",
-  "input_len": 784,
+  "input_len": 848,
   "num_classes": 10,
   "labels": [
     "滚动体故障-0.007in",
@@ -18,18 +18,17 @@
   ],
   "dataset": {
     "name": "CWRU-0HP",
-    "path": "D:\\22project\\testRestfulProject\\1DCNN\\0HP",
+    "path": "D:\\22project\\testRestfulProject\\cwt_cnn\\0HP",
     "stats": {
-      "dataset_dir": "D:\\22project\\testRestfulProject\\1DCNN\\0HP",
+      "dataset_dir": "D:\\22project\\testRestfulProject\\cwt_cnn\\0HP",
+      "dataset_type": "matlab",
       "strict": true,
       "legacy_scaler": false,
       "seed": 42,
       "num_classes": 10,
-      "train_total": 4200,
-      "valid_total": 810,
-      "test_total": 810,
       "nan_windows_total": 0,
       "skipped_out_of_range_total": 180,
+      "unregistered_files": [],
       "per_class": [
         {
           "filename": "48k_Drive_End_B007_0_122.mat",
@@ -161,13 +160,16 @@
           },
           "nan_windows": 0
         }
-      ]
+      ],
+      "train_total": 4200,
+      "valid_total": 810,
+      "test_total": 810
     }
   },
   "params": {
-    "epochs": 10,
+    "epochs": 12,
     "batch_size": 128,
-    "length": 784,
+    "length": 848,
     "number": 600,
     "stride": 150,
     "rate": [
@@ -176,73 +178,87 @@
       0.15
     ],
     "seed": 42,
+    "dataset_type": "matlab",
+    "signal_column": null,
     "strict": true,
     "legacy_scaler": false
   },
   "metrics": {
     "test_accuracy": 0.945679,
-    "test_loss": 0.18744,
-    "val_accuracy": 0.939506,
-    "val_loss": 0.18762,
+    "test_loss": 0.196416,
+    "val_accuracy": 0.94321,
+    "val_loss": 0.221132,
     "history": {
       "accuracy": [
-        0.250476,
-        0.63619,
-        0.762381,
-        0.819524,
-        0.847381,
-        0.865476,
-        0.895,
-        0.905952,
-        0.911667,
-        0.926429
+        0.271905,
+        0.663095,
+        0.790714,
+        0.843095,
+        0.87381,
+        0.895714,
+        0.912381,
+        0.915238,
+        0.924048,
+        0.933571,
+        0.936429,
+        0.93619
       ],
       "loss": [
-        1.877753,
-        0.989527,
-        0.638732,
-        0.490065,
-        0.401031,
-        0.347568,
-        0.285463,
-        0.253357,
-        0.23613,
-        0.211902
+        1.849763,
+        0.917542,
+        0.582237,
+        0.43203,
+        0.340819,
+        0.283165,
+        0.24903,
+        0.225119,
+        0.205139,
+        0.188763,
+        0.174096,
+        0.175884
       ],
       "val_accuracy": [
-        0.602469,
-        0.819753,
-        0.883951,
-        0.911111,
-        0.917284,
-        0.934568,
-        0.938272,
-        0.941975,
-        0.944444,
-        0.939506
+        0.572839,
+        0.833333,
+        0.888889,
+        0.916049,
+        0.925926,
+        0.933333,
+        0.930864,
+        0.937037,
+        0.937037,
+        0.940741,
+        0.937037,
+        0.94321
       ],
       "val_loss": [
-        1.22305,
-        0.641747,
-        0.454356,
-        0.342774,
-        0.283485,
-        0.250426,
-        0.237638,
-        0.228364,
-        0.21914,
-        0.18762
+        1.184645,
+        0.61161,
+        0.408583,
+        0.32336,
+        0.25184,
+        0.235297,
+        0.232752,
+        0.229175,
+        0.219413,
+        0.217149,
+        0.207651,
+        0.221132
       ]
     },
-    "classification_report": "              precision    recall  f1-score   support\n\n           0     0.8352    0.8444    0.8398        90\n           1     0.8630    0.7000    0.7730        90\n           2     1.0000    1.0000    1.0000        90\n           3     1.0000    1.0000    1.0000        90\n           4     0.0000    0.0000    0.0000         0\n           5     1.0000    1.0000    1.0000        90\n           6     1.0000    1.0000    1.0000        90\n           7     1.0000    1.0000    1.0000        90\n           8     1.0000    0.9667    0.9831        90\n           9     1.0000    1.0000    1.0000        90\n\n    accuracy                         0.9457       810\n   macro avg     0.8698    0.8511    0.8596       810\nweighted avg     0.9665    0.9457    0.9551       810\n"
+    "classification_report": "              precision    recall  f1-score   support\n\n           0     0.7768    0.9667    0.8614        90\n           1     0.9643    0.6000    0.7397        90\n           2     1.0000    1.0000    1.0000        90\n           3     1.0000    1.0000    1.0000        90\n           4     0.0000    0.0000    0.0000         0\n           5     0.9677    1.0000    0.9836        90\n           6     0.9783    1.0000    0.9890        90\n           7     1.0000    1.0000    1.0000        90\n           8     1.0000    0.9444    0.9714        90\n           9     1.0000    1.0000    1.0000        90\n\n    accuracy                         0.9457       810\n   macro avg     0.8687    0.8511    0.8545       810\nweighted avg     0.9652    0.9457    0.9495       810\n",
+    "untested_labels": [
+      "内圈故障-0.014in"
+    ],
+    "note": "以下类别没有任何测试样本，未参与测试指标计算：['内圈故障-0.014in']"
   },
   "confusion": [
     [
-      76,
-      7,
+      87,
+      2,
       0,
       0,
-      7,
+      1,
       0,
       0,
       0,
@@ -250,11 +266,11 @@
       0
     ],
     [
-      15,
-      63,
+      25,
+      54,
       0,
       0,
-      12,
+      11,
       0,
       0,
       0,
@@ -334,15 +350,15 @@
       0
     ],
     [
+      0,
+      0,
+      0,
+      0,
       0,
       3,
+      2,
       0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      87,
+      85,
       0
     ],
     [
@@ -359,9 +375,11 @@
     ]
   ],
   "scaler_file": "scaler.npz",
-  "trained_at": "2026-09-12T21:13:18",
-  "log_file": "D:\\22project\\testRestfulProject\\data\\logs\\train-1dcnn-20260912-211318.log",
-  "version": "v1",
-  "weights_file": "model.h5",
-  "created_at": "2026-09-12T21:13:34"
+  "trained_at": "2026-09-15T01:25:06",
+  "log_file": "D:\\22project\\testRestfulProject\\data\\logs\\train-1dcnn-20260915-012506.log",
+  "trusted": true,
+  "provenance": "train",
+  "version": "v2",
+  "weights_file": "model.keras",
+  "created_at": "2026-09-15T01:25:25"
 }

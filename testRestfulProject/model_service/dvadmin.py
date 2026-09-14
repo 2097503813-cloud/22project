@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Django-Vue3-Admin（dvadmin）兼容层 —— 让 frontend/22project 直接跑在本服务上。
 
 ⚠️ 这个模块存在的全部理由：
@@ -74,7 +74,7 @@ def _user_payload() -> dict:
     return {
         "id": 1, "username": "admin", "name": "管理员", "avatar": "",
         "email": "admin@localhost", "mobile": "", "gender": "1",
-        "dept_info": {"dept_id": 1, "dept_name": "轴承故障诊断平台"},
+        "dept_info": {"dept_id": 1, "dept_name": "东风设备轴承故障诊断平台"},
         "role_info": [{"id": 1, "name": "超级管理员", "key": "admin"}],
         "roles": ["admin"], "is_superuser": True, "pwd_change_count": 1,
         "description": "本地演示账号（由 model_service 兼容层提供）",
@@ -189,8 +189,8 @@ def build_blueprint() -> Blueprint:
         ⚠️ 返回的是**平铺的 key-value**，不是列表：前端拿它当 map 下标取值，
         给成数组会让 `systemConfig['base.captcha_state']` 恒为 undefined（登录页验证码又冒出来）。
         """
-        return _ok({"base.captcha_state": False, "base.site_name": "轴承故障诊断平台",
-                    "base.login_title": "轴承故障诊断平台"})
+        return _ok({"base.captcha_state": False, "base.site_name": "东风设备轴承故障诊断平台",
+                    "base.login_title": "东风设备轴承故障诊断平台"})
 
     @bp.get("/api/system/menu_button/menu_button_all_permission/")
     def menu_button_all_permission():
@@ -218,7 +218,7 @@ def build_blueprint() -> Blueprint:
     @bp.get("/api/system/system_config/get_table_data/")
     def system_config():
         """系统配置表（另一条取配置的路径，与 /api/init/settings/ 给同样的值）。"""
-        return _ok({"base.captcha_state": False, "base.site_name": "轴承故障诊断平台"})
+        return _ok({"base.captcha_state": False, "base.site_name": "东风设备轴承故障诊断平台"})
 
     @bp.get("/api/system/dept/all_dept/")
     @bp.get("/api/system/dept/dept_all/")
@@ -230,8 +230,8 @@ def build_blueprint() -> Blueprint:
         分页对象，报错是 "Cannot create property 'id' on number '0'" —— 报错点在建树，
         根因却在返回结构，别被带偏。
         """
-        return _ok([{"id": 1, "parent": None, "name": "轴承故障诊断平台",
-                     "dept_name": "轴承故障诊断平台", "key": 1, "owner": [], "status": True}])
+        return _ok([{"id": 1, "parent": None, "name": "东风设备轴承故障诊断平台",
+                     "dept_name": "东风设备轴承故障诊断平台", "key": 1, "owner": [], "status": True}])
 
     @bp.get("/api/dvadmin3_social_oauth2/backend/get_login_backend/")
     def login_backend():

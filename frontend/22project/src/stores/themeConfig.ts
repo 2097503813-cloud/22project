@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia';
+﻿import { defineStore } from 'pinia';
 
 /**
  * 布局配置
@@ -52,8 +52,8 @@ export const useThemeConfig = defineStore('themeConfig', {
 			columnsAsideLayout: 'columns-vertical',
 			layout: 'classic',
 			isRequestRoutes: true,
-			globalTitle: '轴承故障诊断平台',
-			globalViceTitle: '轴承故障诊断平台',
+			globalTitle: '东风设备轴承故障诊断平台',
+			globalViceTitle: '东风设备轴承故障诊断平台',
 			globalViceTitleMsg: '',
 			globalI18n: 'zh-cn',
 			globalComponentSize: 'default',

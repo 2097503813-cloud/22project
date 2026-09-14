@@ -64,10 +64,14 @@ data/models/<模型名>/v1/model.keras | model.h5 | model.pt | detector.pkl
                        v1/scaler.npz     ← 训练期标准化参数（推理必须复用）
                        v1/meta.json      ← 输入长度、类别表、指标、超参、数据集指纹
 data/logs/train-<模型>-<时间>.log          ← 训练全过程日志
-data/model_management.db                   ← 未接真库时的 SQLite 兜底库
 ```
 
 `meta.json` 里**必须**带类别表（`labels`）：否则模型文件本身无法解释 0..9 对应哪种故障。
+
+产物与图**只落在文件系统上**（`data/` 下），数据库只负责索引/元数据，且**只用 MySQL**
+（表结构见 `sql/schema_mysql.sql`）。原来这里写着 `data/model_management.db ← 未接真库时的
+SQLite 兜底库`，那个 sqlite 兜底连同它的 `SQLITE_PATH` 常量都已被删除——`MODEL_DB_DIALECT`
+写 `mysql` 以外的值会在启动时直接 `RuntimeError`（详见第三节）。
 
 ## 二·补、出图（matplotlib，落 PNG 不弹窗）
 
@@ -121,19 +125,22 @@ data/figures/<模型>/<版本>/training_curves.png        准确率/损失（训
 
 - **权威锚点**：`InferenceTasks.TrainingID`（不是 DeploymentID）。理由是推理结果的可信度取决于
   「哪一次训练」，部署只是同一次训练的投放位置；因此 `DeploymentID`/`DeviceID` 留空，
-  等「边缘设备」支线落地后再回填。这条正是 `sql/schema.sql` 末尾自己标注的悬案。
+  等「边缘设备」支线落地后再回填。这条正是 `sql/schema_mysql.sql` 里自己标注的悬案
+  （见 `InferenceTasks.TrainingID` 的注释"权威锚点"）。
 - **`TargetDatasetID` 是 NOT NULL**：内联样本没有"数据集"概念，服务会登记一条
   `ADHOC-<模型名>` 数据集，而不是为了满足外键去伪造真实数据集。
-- 三种方言由环境变量切换，表结构分别复用仓库里已有的脚本：
+- **只用 MySQL**（`MODEL_DB_DIALECT=mysql`）：驱动 pymysql，建表脚本只有 `sql/schema_mysql.sql`
+  （脚本自带 `CREATE DATABASE` + `USE`，全部是 `CREATE TABLE IF NOT EXISTS`，可重复执行）。
+  `Config.__init__` 会校验这个变量，**写 `mysql` 以外的值会在启动时直接 `RuntimeError`**，
+  不会静默换库、也不会"看起来能跑"。
+  ⚠️ 早期为了"没装库也能跑"支持过 sqlite 兜底与 SQL Server（pyodbc），三套方言各自演化出
+  占位符 `%s`/`?`、`LIMIT`/`TOP`、建表脚本等一堆差异，现已全部移除：`sql/` 下只剩
+  `schema_mysql.sql`。
 
-| `MODEL_DB_DIALECT` | 驱动 | 建表脚本 |
-|---|---|---|
-| `mysql` | pymysql | `sql/schema_mysql.sql`（**本机当前使用**） |
-| `sqlite` | 标准库 | `sql/schema_sqlite.sql`（本次新增的镜像表，零配置兜底） |
-| `sqlserver` | pyodbc | `sql/schema.sql`（按 `GO` 分批，库不存在会先在 master 里建） |
-
-其余变量：`MODEL_DB_HOST` `MODEL_DB_PORT` `MODEL_DB_USER` `MODEL_DB_PASSWORD`
-`MODEL_DB_NAME` `MODEL_DB_ODBC_DRIVER` `MODEL_DB_TRUSTED`。
+连接变量：`MODEL_DB_HOST`（默认 `127.0.0.1`）`MODEL_DB_PORT`（默认 `3306`）
+`MODEL_DB_USER`（默认 `root`）`MODEL_DB_PASSWORD`（默认空）`MODEL_DB_NAME`（默认 `model_management`）。
+⚠️ 曾经用过的 `MODEL_DB_ODBC_DRIVER` / `MODEL_DB_TRUSTED`（SQL Server 专用）**已废弃**：
+代码里没有任何地方读它们，配了也不起作用。
 
 **本机现状（已接通）**：MySQL 9.2 @ `127.0.0.1:3306`，库 `model_management`，
 应用账号 `ljx666`（已授权 `model_management.*`）。这些值写在项目根的 **`db.env`** 里，
@@ -142,9 +149,10 @@ data/figures/<模型>/<版本>/training_curves.png        准确率/损失（训
 
 > 注意：`db.env` 含明文口令，不要外发或提交版本库。
 >
-> SQL Server 那一路本机**跑不通**：`MSSQL$SQLEXPRESS` 服务虽然在跑，但机器上只有过时的
-> `SQL Server` / `SQL Server Native Client 10.0` ODBC 驱动，用信任连接报"安全包中没有可用的凭证"、
-> 用旧驱动报 SSL 错误；要用它得先装微软官方 ODBC Driver 17/18。
+> 历史记录（该分支已删除）：SQL Server 那一路在本机就跑不通——`MSSQL$SQLEXPRESS` 服务虽然在跑，
+> 但机器上只有过时的 `SQL Server` / `SQL Server Native Client 10.0` ODBC 驱动，用信任连接报
+> "安全包中没有可用的凭证"、用旧驱动报 SSL 错误。这也是后来统一到 MySQL、把 sqlserver 分支
+> 整体删掉的原因之一。
 
 ## 四、与既有脚本的关系（改了什么、没改什么）
 

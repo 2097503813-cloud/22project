@@ -43,7 +43,11 @@ DATASET_DIRS = {
     "CWRU-0HP": PROJECT_DIR / "1DCNN" / "0HP",
     "CWRU-0HP(cwt)": PROJECT_DIR / "cwt_cnn" / "0HP",
 }
-ADTK_DATASET_DIR = PROJECT_DIR / "adtk" / "dataset"
+
+# ⚠️ 原来的 ADTK_DATASET_DIR（adtk/dataset，adtk 自带样例数据的目录）已删除：全项目零读取方。
+#    adtk 分支的基线文件现在完全由训练请求的 dataset_dir 决定，找不到就明确报错
+#    （见 training._train_adtk）——那个"静默退回 adtk/dataset/cpu.csv"的兜底早就删掉了，
+#    这个常量是它留下的最后一截尾巴。
 
 # 这三个目录是运行期必需品，import 时就建好，免得别处还要各自判存在性
 for _d in (DATA_DIR, MODEL_DIR, LOG_DIR, UPLOAD_DIR):
@@ -124,7 +128,9 @@ class Config:
 
     def __init__(self) -> None:
         """把模块级的路径常量与环境变量快照成一份不可变配置。"""
-        self.service_dir = SERVICE_DIR
+        # ⚠️ 这里原来的 self.service_dir 与文件末尾的 self.adtk_dataset_dir 已删除：
+        #    两个属性全项目都没有任何读取方（只有赋值行本身），属于纯占位的配置面。
+        #    模块级常量 SERVICE_DIR **保留**——上面的 PROJECT_DIR = SERVICE_DIR.parent 依赖它。
         self.project_dir = PROJECT_DIR
         self.workspace_dir = WORKSPACE_DIR
         self.data_dir = DATA_DIR
@@ -133,7 +139,6 @@ class Config:
         self.upload_dir = UPLOAD_DIR
         self.sql_dir = SQL_DIR
         self.dataset_dirs = dict(DATASET_DIRS)
-        self.adtk_dataset_dir = ADTK_DATASET_DIR
 
         # 本项目**只支持 MySQL**：早期为了"没装库也能跑"写过 SQLite 兜底与 SQL Server 分支，
         # 结果是三套方言各自演化、埋了不少坑（占位符、TOP/LIMIT、建表语句）。现在统一到 MySQL，

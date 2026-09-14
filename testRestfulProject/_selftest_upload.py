@@ -2,6 +2,8 @@
 """临时自测：模型探测（是不是模型）+ 上传（免填 input_len/类别数）+ 改名。
 
 跑法：venv\\Scripts\\python.exe _selftest_upload.py
+（在**任意工作目录**下都能跑：响应里回报的相对路径统一由 resolve_reported_path()
+  按「工作区根 → 项目目录」两级解析，不再依赖当前目录）
 跑完全部自己清理（删产物目录 + 删 Models 登记行），不留垃圾。
 """
 from __future__ import annotations
@@ -33,6 +35,26 @@ def check(name: str, cond: bool, extra: str = "") -> None:
     print(f"  {OK if cond else FAIL} {name}{(' — ' + extra) if extra else ''}")
     if not cond:
         failures.append(name)
+
+
+def resolve_reported_path(raw: str) -> Path:
+    """把响应里回报的路径解析成真实路径。
+
+    ⚠️ 不能直接 `Path(raw)` 相对当前目录拼：响应出口 api._install_path_mask 会把本机绝对路径
+    脱敏成"相对工作区"的写法（`D:\\22project\\testRestfulProject\\data\\models\\X\\v1`
+    → `testRestfulProject\\data\\models\\X\\v1`），于是在 testRestfulProject 目录下运行本脚本时
+    会被拼成 testRestfulProject\\testRestfulProject\\data\\...，误报"落盘 meta.json 不存在"。
+
+    口径与 inference._guard_path / api.Train.post 一致：**先按工作区根试、再按项目目录试**；
+    两处都不存在时退回"相对当前目录"（与修复前行为一致，便于把真实路径打印出来看）。
+    """
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    for base in (CONF.workspace_dir, CONF.project_dir):
+        if (base / path).exists():
+            return base / path
+    return Path.cwd() / path
 
 
 def fake_h5(input_len: int = 512, units: int = 10) -> bytes:
@@ -113,7 +135,8 @@ def main() -> int:
         check("input_len 自动识别 = 512", body["input_len"] == 512, f"actual={body['input_len']}")
         check("类别数自动识别 = 10", body["num_classes"] == 10, f"actual={body['num_classes']}")
         check("10 类自动补 CWRU 中文标签", len(body["labels"] or []) == 10, str(body["labels"])[:80])
-        check("落盘 meta.json 存在", (Path(body["directory"]) / "meta.json").is_file())
+        check("落盘 meta.json 存在",
+              (resolve_reported_path(body["directory"]) / "meta.json").is_file())
         check("Models 表已登记", any(r["ModelName"] == body["model"] for r in database.models_in_db()))
         check("ModelType 规范化成 Classification", body["db"]["written"] and
               next(r["ModelType"] for r in database.models_in_db() if r["ModelName"] == body["model"]) == "Classification")

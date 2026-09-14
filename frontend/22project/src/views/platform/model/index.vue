@@ -126,19 +126,21 @@
 					<el-card shadow="never">
 						<template #header><span>训练参数</span></template>
 						<el-form label-width="130px" size="small">
-							<el-form-item label="数据源">
-								<el-select v-model="train.dataset_type" style="width: 100%">
-									<el-option label="CWRU .mat（取 DE 通道）" value="matlab" />
-									<el-option label="表格数据集（Excel/CSV，一文件一类别）" value="tabular" />
-									<el-option label="自动（按目录内容判断）" value="auto" />
-								</el-select>
-							</el-form-item>
+							<!-- 「数据源」select 已删除：它的值每次选目录都会被 syncSource() 用目录带出的
+							     dataset_type 覆盖，而目录下拉的 label 里本来就有 [表格/mat]，留着只是个会骗人的状态。
+							     ⚠️ train.dataset_type 这个键**照旧发送**（由目录带出），后端行为完全不变。 -->
 							<el-form-item label="数据集目录">
 								<el-select v-model="train.dataset_dir" style="width: 100%" @change="syncSource">
 									<el-option v-for="d in datasetOptions" :key="d.value" :label="d.label" :value="d.value" />
 								</el-select>
 							</el-form-item>
-							<el-form-item label="信号列">
+							<!-- adtk 的专属入口：training.py 的 _train_adtk 就是拿 dataset_dir + baseline_file
+							     去找那个「正常」样本文件，找不到会直接报错（不再静默退回自带的 cpu.csv） -->
+							<el-form-item v-if="isAdtkTrain" label="基线文件">
+								<el-input v-model="train.baseline_file" placeholder="normal_0_97.mat" />
+								<div class="hint">必须存在于所选数据集目录中</div>
+							</el-form-item>
+							<el-form-item v-if="!isAdtkTrain" label="信号列">
 								<el-input v-model="train.signal_column" placeholder="表格数据留空=自动识别（如 振动幅值）" />
 							</el-form-item>
 							<el-form-item label="模型">
@@ -148,20 +150,34 @@
 									<el-option label="算法模型3 · adtk（无监督，已搁置）" value="adtk" />
 								</el-select>
 							</el-form-item>
+							<!-- adtk 是无监督路线：不读 epochs / batch_size / signal_column，strict 也不生效
+							     （它只吃 .mat 的 DE 通道切窗），所以这些控件在 adtk 下隐藏——改了不生效的控件
+							     比没控件更误导。⚠️ 只是不显示：v-model 的值照旧随 payload 发出去，
+							     后端收到的参数集与改动前逐字节一致 -->
 							<el-row :gutter="8">
-								<el-col :span="8"><el-form-item label="轮次" label-width="50px"><el-input-number v-model="train.epochs" :min="1" :max="200" controls-position="right" style="width: 100%" /></el-form-item></el-col>
+								<el-col v-if="!isAdtkTrain" :span="8"><el-form-item label="轮次" label-width="50px"><el-input-number v-model="train.epochs" :min="1" :max="200" controls-position="right" style="width: 100%" /></el-form-item></el-col>
 								<el-col :span="8"><el-form-item label="长度" label-width="50px"><el-input-number v-model="train.length" :min="64" :step="64" controls-position="right" style="width: 100%" /></el-form-item></el-col>
-								<el-col :span="8"><el-form-item label="每类窗数" label-width="80px"><el-input-number v-model="train.number" :min="10" controls-position="right" style="width: 100%" /></el-form-item></el-col>
+								<!-- adtk 的 number 是「基线窗口数」，后端少于 20 个窗口直接报错，所以 min 跟着抬到 20 -->
+								<el-col :span="isAdtkTrain ? 16 : 8">
+									<el-form-item :label="isAdtkTrain ? '基线窗口数（≥20）' : '每类窗数'" :label-width="isAdtkTrain ? '140px' : '80px'">
+										<el-input-number v-model="train.number" :min="isAdtkTrain ? 20 : 10" controls-position="right" style="width: 100%" />
+									</el-form-item>
+								</el-col>
 							</el-row>
 							<el-row :gutter="8">
-								<el-col :span="8"><el-form-item label="步长" label-width="50px"><el-input-number v-model="train.stride" :min="1" controls-position="right" style="width: 100%" /></el-form-item></el-col>
-								<el-col :span="8"><el-form-item label="批大小" label-width="60px"><el-input-number v-model="train.batch_size" :min="1" controls-position="right" style="width: 100%" /></el-form-item></el-col>
+								<el-col :span="isAdtkTrain ? 16 : 8">
+									<el-form-item label="步长" label-width="50px">
+										<el-input-number v-model="train.stride" :min="1" controls-position="right" style="width: 100%" />
+										<div v-if="isAdtkTrain" class="hint">默认等于长度（不重叠）</div>
+									</el-form-item>
+								</el-col>
+								<el-col v-if="!isAdtkTrain" :span="8"><el-form-item label="批大小" label-width="60px"><el-input-number v-model="train.batch_size" :min="1" controls-position="right" style="width: 100%" /></el-form-item></el-col>
 								<el-col :span="8"><el-form-item label="种子" label-width="50px"><el-input-number v-model="train.seed" :min="0" controls-position="right" style="width: 100%" /></el-form-item></el-col>
 							</el-row>
 							<el-form-item label="数据集登记名">
 								<el-input v-model="train.dataset" placeholder="写入 Datasets 表的名称" />
 							</el-form-item>
-							<el-form-item label="越界窗口">
+							<el-form-item v-if="!isAdtkTrain" label="越界窗口">
 								<el-switch v-model="train.strict" active-text="跳过（推荐，不补 NaN）" inactive-text="复刻旧脚本（补 NaN）" />
 							</el-form-item>
 							<el-button type="primary" :loading="training" @click="doTrain">
@@ -175,31 +191,60 @@
 						<template #header><span>训练结果</span></template>
 						<div v-if="!trainResult" class="empty">还没有训练结果</div>
 						<template v-else>
+							<!-- 结果卡按任务类型分两套：分类（有监督）看准确率/loss/混淆矩阵；
+							     异常检测（adtk 无监督）根本没有准确率这一说，硬套分类那 7 行只会
+							     一排「—」+ 空白，看着像训练失败。分叉判据见 isAnomalyResult() -->
 							<el-descriptions :column="1" border size="small">
 								<el-descriptions-item label="状态">
 									<el-tag :type="trainResult.status === '成功' ? 'success' : 'danger'" size="small">{{ trainResult.status }}</el-tag>
 									耗时 {{ trainResult.duration_sec }} 秒
 								</el-descriptions-item>
 								<el-descriptions-item label="产物">{{ trainResult.artifact?.weights }}（{{ trainResult.artifact?.version }}）</el-descriptions-item>
-								<el-descriptions-item label="测试准确率">
-									{{ fmt(trainResult.metrics?.test_accuracy) }} / loss {{ fmt(trainResult.metrics?.test_loss) }}
-								</el-descriptions-item>
-								<el-descriptions-item label="验证准确率">{{ fmt(trainResult.metrics?.val_accuracy) }}</el-descriptions-item>
-								<el-descriptions-item label="训练/验证/测试">
-									{{ trainResult.dataset_stats?.train_total }} / {{ trainResult.dataset_stats?.valid_total }} / {{ trainResult.dataset_stats?.test_total }}
-								</el-descriptions-item>
-								<el-descriptions-item label="跳过越界 / NaN">
-									{{ trainResult.dataset_stats?.skipped_out_of_range_total ?? '—' }} / {{ trainResult.dataset_stats?.nan_windows_total ?? '—' }}
-								</el-descriptions-item>
+
+								<!-- ===== 按任务类型分两套模板 =====
+								     分类（有监督）：测试/验证准确率 + loss + 训练/验证/测试切分（保持原来的 7 行）；
+								     异常检测（adtk 无监督）：根本没有准确率这一说，硬套上面那套会渲染出一排「—」，
+								     看着像训练失败，所以改显示基线窗口数/检测器/阈值/基线误报率与后端给的 note。
+								     判据见 isAnomalyResult() -->
+								<template v-if="!isAnomalyResult()">
+									<el-descriptions-item label="测试准确率">
+										{{ fmt(trainResult.metrics?.test_accuracy) }} / loss {{ fmt(trainResult.metrics?.test_loss) }}
+									</el-descriptions-item>
+									<el-descriptions-item label="验证准确率">{{ fmt(trainResult.metrics?.val_accuracy) }}</el-descriptions-item>
+									<el-descriptions-item label="训练/验证/测试">
+										{{ trainResult.dataset_stats?.train_total ?? '—' }} / {{ trainResult.dataset_stats?.valid_total ?? '—' }} / {{ trainResult.dataset_stats?.test_total ?? '—' }}
+									</el-descriptions-item>
+									<el-descriptions-item label="跳过越界 / NaN">
+										{{ trainResult.dataset_stats?.skipped_out_of_range_total ?? '—' }} / {{ trainResult.dataset_stats?.nan_windows_total ?? '—' }}
+									</el-descriptions-item>
+								</template>
+								<template v-else>
+									<el-descriptions-item label="基线窗口数">{{ trainResult.dataset_stats?.windows ?? '—' }}</el-descriptions-item>
+									<el-descriptions-item label="基线点数">{{ trainResult.dataset_stats?.baseline_points ?? '—' }}</el-descriptions-item>
+									<el-descriptions-item label="检测器">{{ trainResult.dataset_stats?.detector || '—' }}</el-descriptions-item>
+									<el-descriptions-item label="主成分数 k">{{ trainResult.dataset_stats?.k ?? '—' }}</el-descriptions-item>
+									<el-descriptions-item label="特征模式">{{ trainResult.dataset_stats?.feature_mode || '—' }}</el-descriptions-item>
+									<el-descriptions-item label="判定阈值">
+										{{ fmtThreshold(trainResult.metrics?.threshold ?? trainResult.dataset_stats?.threshold) }}
+									</el-descriptions-item>
+									<el-descriptions-item label="基线误报率">
+										{{ fmtPct(trainResult.metrics?.baseline_false_positive_rate ?? trainResult.dataset_stats?.baseline_false_positive_rate) }}
+									</el-descriptions-item>
+									<el-descriptions-item label="说明">{{ trainResult.metrics?.note || '—' }}</el-descriptions-item>
+								</template>
+
 								<el-descriptions-item label="写库">
 									<Tag :text="trainResult.db" />
 								</el-descriptions-item>
 							</el-descriptions>
-							<div class="figs mt">
-								<el-image v-for="f in trainResult.figures || []" :key="f.url" :src="fileUrl(f.url)"
+							<!-- 图区：没图时给一句话说明，而不是留一个空 div（adtk 本来就不出训练曲线/混淆矩阵） -->
+							<div v-if="(trainResult.figures || []).length" class="figs mt">
+								<el-image v-for="f in trainResult.figures" :key="f.url" :src="fileUrl(f.url)"
 									:preview-src-list="[fileUrl(f.url)]" fit="contain" class="fig" />
 							</div>
-							<el-collapse class="mt">
+							<div v-else class="hint mt">该模型不产出训练曲线/混淆矩阵</div>
+							<!-- 无监督模型没有 classification_report（后端恒给 null），留着只会显示一个「—」 -->
+							<el-collapse v-if="!isAnomalyResult()" class="mt">
 								<el-collapse-item title="classification_report">
 									<pre class="pre">{{ trainResult.metrics?.classification_report || '—' }}</pre>
 								</el-collapse-item>
@@ -290,9 +335,14 @@
 					<el-table-column prop="ModelName" label="模型" width="110" />
 					<el-table-column prop="DatasetName" label="数据集" width="160" />
 					<el-table-column prop="TrainName" label="训练名" min-width="200" />
-					<el-table-column prop="Epochs" label="轮次" width="80" />
-					<el-table-column label="准确率" width="110"><template #default="{ row }">{{ fmt(row.Accuracy) }}</template></el-table-column>
-					<el-table-column label="loss" width="110"><template #default="{ row }">{{ fmt(row.Loss) }}</template></el-table-column>
+					<!-- 轮次/准确率/loss 合并成一列：Epochs 是无监督模型不存在的常数，准确率与 loss 又是一对
+					     必须成对看的指标，三列并成一列省掉两格空白（无监督的 Accuracy/Loss 后端恒为 NULL） -->
+					<el-table-column label="测试指标" min-width="170">
+						<template #default="{ row }">
+							<span v-if="isAnomalyTraining(row)" class="hint">无监督·无准确率</span>
+							<span v-else>{{ fmt(row.Accuracy) }} / {{ fmt(row.Loss) }}</span>
+						</template>
+					</el-table-column>
 					<el-table-column label="状态" width="90">
 						<template #default="{ row }"><el-tag :type="row.Status === '成功' ? 'success' : 'danger'" size="small">{{ row.Status }}</el-tag></template>
 					</el-table-column>
@@ -310,8 +360,11 @@
 					<el-table-column prop="ModelName" label="模型" width="110" />
 					<el-table-column prop="TaskType" label="类型" width="150" />
 					<el-table-column prop="TrainingID" label="锚点训练" width="100" />
-					<el-table-column prop="TargetDatasetID" label="目标数据集" width="110" />
-					<el-table-column prop="Progress" label="进度" width="80" />
+					<!-- 「目标数据集」只显示一个 ID，价值低；改成显示后端早就 SELECT 出来、前端一直没用的
+					     ResultSummary（db.recent_inference_tasks 的列里有它），内容长所以溢出用 tooltip 看全 -->
+					<el-table-column label="摘要" min-width="220" show-overflow-tooltip>
+						<template #default="{ row }">{{ row.ResultSummary || '—' }}</template>
+					</el-table-column>
 					<el-table-column label="状态" width="90">
 						<template #default="{ row }"><el-tag :type="row.Status === '成功' ? 'success' : 'danger'" size="small">{{ row.Status }}</el-tag></template>
 					</el-table-column>
@@ -480,8 +533,14 @@ const fileOptions = computed(() => {
 });
 
 const train = reactive<any>({ model: '1dcnn', dataset_type: 'matlab', dataset_dir: '', signal_column: '',
-	epochs: 10, length: 784, number: 600, stride: 150, batch_size: 128, seed: 42, dataset: 'CWRU-0HP', strict: true });
+	epochs: 10, length: 784, number: 600, stride: 150, batch_size: 128, seed: 42, dataset: 'CWRU-0HP', strict: true,
+	// baseline_file 是 training.py 早就读的既有参数（_train_adtk 拿它 + dataset_dir 找正常样本文件），
+	// 不是新契约；非 adtk 模型不会用到它，但键照旧随 payload 发出去，后端各分支只取自己认识的键
+	baseline_file: 'normal_0_97.mat' });
 const pred = reactive<any>({ model: '1dcnn', path: '', column: '', index: 0, limit: 4, top_k: 3 });
+/** 训练表单是不是在配 adtk（无监督）：决定哪些控件该显示——adtk 不读 epochs/batch_size/signal_column/strict，
+ *  改了也不生效的控件比没有控件更误导，所以这些项对 adtk 直接隐藏（隐藏不上删键，值照旧发送） */
+const isAdtkTrain = computed(() => train.model === 'adtk');
 
 const training = ref(false);
 const predicting = ref(false);
@@ -515,6 +574,8 @@ const isAnomalyModel = computed(() => {
 });
 /** 阈值/分数是 1e-3 量级的小数，用科学计数法更好读 */
 const fmtThreshold = (v: any) => (v === null || v === undefined ? '—' : Number(v).toExponential(3));
+/** 比率 → 百分比（0.0123 → "1.23%"）：基线误报率、异常占比这类 0~1 的字段用它 */
+const fmtPct = (v: any) => (v === null || v === undefined ? '—' : `${(Number(v) * 100).toFixed(2)}%`);
 /** 异常分数：大数用定点、小数用科学计数法，别把 4.5e-5 显示成 0.0000 */
 const fmtScore = (v: any) => {
 	if (v === null || v === undefined) return '—';
@@ -539,6 +600,19 @@ const rowMetric = (row: any): { value: string; label: string } => {
 	const accuracy = metrics.test_accuracy;
 	return { value: accuracy === null || accuracy === undefined ? '—' : fmt(accuracy), label: '测试准确率' };
 };
+/** 训练结果是不是「异常检测（adtk 无监督）」那一套 —— 决定结果卡走哪个模板。
+ *  后端 _train_adtk 的 metrics.classification_report 恒为 None，并带一条 note 说明"无监督模型没有准确率"，
+ *  dataset_stats 里也只有基线/检测器这类字段；分类模型一定有 classification_report，故以它为主判据，
+ *  note / 基线字段作兜底（训练在出指标前就失败时 metrics 可能只有 note）。 */
+const isAnomalyResult = (): boolean => {
+	const metrics = trainResult.value?.metrics || {};
+	if (metrics.classification_report != null) return false;
+	const stats = trainResult.value?.dataset_stats || {};
+	return metrics.note != null || stats.detector != null || stats.baseline_source != null;
+};
+/** 训练记录行是不是异常检测：无监督的 Accuracy/Loss 后端恒为 NULL，或模型名就是 adtk */
+const isAnomalyTraining = (row: any): boolean =>
+	(row?.Accuracy == null && row?.Loss == null) || String(row?.ModelName || '').toLowerCase() === 'adtk';
 const labelRows = computed(() =>
 	((overview.value?.labels as string[]) || []).map((label, id) => ({ id, label }))
 );

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Django-Vue3-Admin（dvadmin）兼容层 —— 让 frontend/22project 直接跑在本服务上。
 
 ⚠️ 这个模块存在的全部理由：
@@ -319,22 +319,25 @@ def register_dvadmin(app) -> None:
 
     @app.errorhandler(404)
     def _not_found(err):                       # noqa: ANN001
-        """未实现的 /api/** 一律回 JSON（而不是 404 的 HTML 页面），方便定位缺哪个接口。
+        """**任何**未匹配的路径都回 JSON 404（不再是 Flask 默认的 HTML 页面）。
 
-        Flask 默认的 404 是一整页 HTML，前端 axios 拿到的是一坨 `<html>`，
-        报错信息里既看不出缺哪个接口、也过不了信封解析；换成 `{code:404, msg:...}` 后，
-        msg 里直接带上 `request.path`，缺哪个接口一眼就能看到。
+        Flask 默认的 404 是一整页 HTML：前端 axios 拿到的是一坨 `<html>`，报错信息里既看不出
+        缺哪个接口、也过不了信封解析；换成 `{code:404, msg:...}` 后 msg 里带上 `request.path`，
+        缺哪个接口一眼就能看到。
+
+        原来只对 `/api/**` 这么做，其它路径 `return err` 落回 HTML —— 于是删掉 `/ui` 控制台后，
+        访问 `/ui` 拿到的是 HTML 404（Content-Type 是 text/html），状态码虽然对，但看着像
+        "另一个问题"。现在统一成 JSON：`/favicon.ico` 之类也一样返回 JSON，浏览器只是不显示，
+        没有副作用。
 
         ⚠️ 这里**不能**改用 `@app.route('/api/<path:...>', methods=['OPTIONS'])` 那种兜底路由：
         它会参与 URL 匹配，把未注册的 /api/xxx 请求截成 405 METHOD NOT ALLOWED
         （请求方法对不上），反而比 404 更难懂。CORS 预检已由上面的 `_preflight`
         （before_request，只拦 OPTIONS）统一放行，这里只需专心处理"找不到"。
         """
-        if request.path.startswith("/api/"):
-            return jsonify({
-                "code": 404,
-                "data": None,
-                "msg": f"model_service 的 dvadmin 兼容层尚未实现该接口：{request.path}",
-            }), 404
-        return err
+        return jsonify({
+            "code": 404,
+            "data": None,
+            "msg": f"未找到该路径：{request.path}",
+        }), 404
 

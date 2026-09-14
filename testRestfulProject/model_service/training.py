@@ -103,6 +103,8 @@ def resolve_source(opts: dict) -> tuple[str, Path, str]:
     （一个文件一个类别，文件名即标签，信号列可显式指定 signal_column）。
     未显式给 dataset_type 时按目录里有什么文件自动判断。
     """
+    # ① 目录从哪来：显式 dataset_dir 优先（相对路径按 project_dir 拼，例如 "1DCNN/0HP"），
+    #    没给就用内置的 CWRU-0HP。目录不存在就直接报错，不做"退回到默认目录"这种事。
     raw_dir = opts.get("dataset_dir")
     if raw_dir:
         directory = Path(raw_dir)
@@ -113,6 +115,9 @@ def resolve_source(opts: dict) -> tuple[str, Path, str]:
     if not directory.is_dir():
         raise FileNotFoundError(f"数据集目录不存在：{directory}")
 
+    # ② 类型怎么定：显式 dataset_type 最优先；没给就"看目录里有什么"——
+    #    ⚠️ 判定顺序是**先表格、后 .mat**：一个目录里同时有两种文件时会走表格路径，
+    #    .mat 被静默忽略（往 1DCNN/0HP 里丢个 csv 就会踩到），所以两种数据源建议分目录放。
     kind = (opts.get("dataset_type") or "").lower()
     if kind not in ("matlab", "tabular"):
         if tabular.has_tables(directory):
@@ -122,6 +127,8 @@ def resolve_source(opts: dict) -> tuple[str, Path, str]:
         else:
             raise FileNotFoundError(f"{directory} 里既没有 .mat 也没有表格文件（csv/xlsx/xls）")
 
+    # ③ 登记名（会写进 Datasets 表）：显式 dataset 优先，否则取目录名；内置目录用固定名，
+    #    表格源补个 "(表格)" 后缀，方便在「数据集管理」页一眼区分两种来源
     name = opts.get("dataset") or (directory.name if raw_dir else "CWRU-0HP")
     if kind == "tabular" and not raw_dir:
         name = f"{name}(表格)"
@@ -131,11 +138,17 @@ def resolve_source(opts: dict) -> tuple[str, Path, str]:
 def load_dataset(opts: dict, length: int, number: int, stride: int, rate: list) -> tuple[str, Path, str, dict]:
     """按数据源类型加载并切窗，两个数据源共用同一套切窗/标准化/划分。"""
     name, directory, kind = resolve_source(opts)
+    # 两个数据源**共用**的切窗/标准化/划分参数——放在这里统一，等于保证"同一个模型换个
+    # 数据源"时口径一致（rate 决定 train/valid/test 比例，seed 决定划分可复现）。
+    # 两个"复刻旧脚本"的开关都在这里透传：
+    #   strict=False   —— 越界窗口不跳过（本服务已统一为跳过，见 datasets._slice_windows）
+    #   legacy_scaler  —— 标准化参数用"训练+测试一起 fit"（有统计量泄漏，只为复刻旧结果）
     common = dict(length=length, number=number, stride=stride, rate=rate,
                   normal=bool(opts.get("normal", True)), seed=int(opts.get("seed", 42)),
                   strict=bool(opts.get("strict", True)),
                   legacy_scaler=bool(opts.get("legacy_scaler", False)))
     if kind == "tabular":
+        # 表格源多两个参数：signal_column（表内指定哪一列当振动信号）、sheet（xlsx 的工作表名）
         data = tabular.load_windows(directory, column=opts.get("signal_column"),
                                     sheet=opts.get("sheet"), **common)
     else:

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import traceback
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -211,15 +212,16 @@ def inference_figures(model: str, version: str, payload: dict, matrix=None) -> d
     try:
         plt = _pyplot()
         predictions = payload.get("predictions") or []
-        task = payload.get("task")
-        summary = payload.get("summary") or {}
+        task = payload.get("task")          # ② 里靠它区分"分类窗口标题"和"异常窗口标题"
 
         # ① 预测分布
-        if task == "classification":
-            from collections import Counter
-            counter = Counter(p["predicted_label"] for p in predictions)
-        else:
-            counter = Counter(p["predicted_label"] for p in predictions)
+        # ⚠️ 这里**不能**按 task 分支：分类与异常检测的预测标签都在 p["predicted_label"] 里，
+        #    两支代码一字不差。历史上这里写成 if task == "classification" 并在分支内
+        #    `from collections import Counter`，于是 Counter 变成函数局部名 —— 非分类任务
+        #    （adtk 的 anomaly_detection）走 else 支时局部名未绑定，必抛 UnboundLocalError，
+        #    被外层整段 try 吞成 figures_error：adtk 推理永远拿不到这张分布图。
+        #    现在 import 提到模块级、分支合并，两条任务类型走同一行。
+        counter = Counter(p["predicted_label"] for p in predictions)
         if counter:
             keys = list(counter)
             values = [counter[k] for k in keys]

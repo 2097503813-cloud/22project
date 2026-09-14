@@ -30,6 +30,8 @@ _VERSION_RE = re.compile(r"^v(\d+)$")
 
 @dataclass
 class Artifact:
+    """\u4e00\u4e2a\u5df2\u843d\u76d8\u7684\u6a21\u578b\u4ea7\u7269\uff1a\u5b9a\u4f4d\u4fe1\u606f\uff08\u76ee\u5f55/\u6743\u91cd\u6587\u4ef6\uff09+ \u81ea\u89e3\u91ca\u4fe1\u606f\uff08\u6846\u67b6/meta\uff09\u3002"""
+
     name: str
     version: str
     directory: Path
@@ -39,9 +41,11 @@ class Artifact:
 
     @property
     def meta_path(self) -> Path:
+        """该产物的 meta.json 路径（可能还不存在，save_artifact 时才写）。"""
         return self.directory / "meta.json"
 
     def to_dict(self) -> dict:
+        """\u6311\u51fa\u7ed9\u63a5\u53e3/\u524d\u7aef\u7528\u7684\u5b57\u6bb5\uff08meta \u91cc\u7684\u539f\u59cb dict \u592a\u5927\uff0c\u4e0d\u900f\u4f20\uff09\u3002"""
         return {
             "model": self.name,
             "version": self.version,
@@ -58,6 +62,7 @@ class Artifact:
         }
 
 
+# \u6a21\u578b\u540d\u5141\u8bb8\u7684\u5b57\u7b26\uff1a\u4e2d\u82f1\u6587\u3001\u6570\u5b57\u3001\u4e0b\u5212\u7ebf\u3001\u70b9\u3001\u6a2a\u7ebf\uff08\u89c1 _model_root \u7684\u5b89\u5168\u8bf4\u660e\uff09
 _MODEL_NAME_RE = re.compile(r"^[\w\u4e00-\u9fa5.\-]+$")
 
 
@@ -87,6 +92,7 @@ def next_version_dir(name: str) -> Path:
 
 
 def _read_meta(directory: Path) -> dict:
+    """读 meta.json；缺失或内容坏掉都返回空 dict，让调用方走默认分支而不是崩掉。"""
     meta_path = directory / "meta.json"
     if not meta_path.is_file():
         return {}
@@ -144,6 +150,7 @@ def save_artifact(name: str, framework: str, saver, meta: dict, keep_previous: b
 
 
 def _prune_except(name: str, keep: str) -> None:
+    """只保留 keep 这一个版本，其余版本目录整个删掉（keep_previous=False 时用）。"""
     for p in _model_root(name).iterdir():
         if p.is_dir() and p.name != keep:
             shutil.rmtree(p, ignore_errors=True)
@@ -197,6 +204,7 @@ def list_artifacts(name: str | None = None) -> list[Artifact]:
 
 
 def latest_meta(name: str) -> dict:
+    """最新版本的 meta（拿不到产物时抛 FileNotFoundError，由调用方决定怎么报）。"""
     return load_artifact(name).meta
 
 

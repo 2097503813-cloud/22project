@@ -50,12 +50,14 @@ def _now() -> str:
 
 
 def _strip_sql_comments(text: str) -> str:
+    """去掉 /* */ 块注释与整行的 -- 行注释，好按分号安全切分脚本。"""
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     text = re.sub(r"^\s*--.*$", "", text, flags=re.M)
     return text
 
 
 def _statements(sql: str) -> list[str]:
+    """把建表脚本切成一条条可执行的 SQL（MySQL 用；T-SQL 走 GO 分批，见 ensure_schema）。"""
     return [s.strip() for s in _strip_sql_comments(sql).split(";") if s.strip()]
 
 
@@ -85,11 +87,20 @@ def _jsonable(value):
 
 
 class Database:
+    """数据库门面（**只用 MySQL**）：连接按线程复用、幂等建表、写入与回读。
+
+    历史说明：早期支持过 SQLite（零配置兜底）与 SQL Server（pyodbc），
+    但三套方言各自演化出一堆分支（占位符 `%s`/`?`、`LIMIT`/`TOP`、建表脚本、
+    `PRAGMA foreign_keys`…），维护成本远大于收益，现已统一到 MySQL，
+    其他方言在 config 与这里各挡一次。
+    """
+
     def __init__(self, cfg=config) -> None:
+        """准备连接缓存与行数缓存；方言不是 MySQL 就直接失败（不猜、不降级）。"""
         self.cfg = cfg
         self.dialect = cfg.db_dialect
-        if self.dialect not in ("sqlite", "mysql", "sqlserver"):
-            raise DBError(f"不支持的 MODEL_DB_DIALECT：{self.dialect}")
+        if self.dialect != "mysql":
+            raise DBError(f"本项目只支持 MySQL，收到 {self.dialect!r}")
         self._schema_ready = False
         self.last_bootstrap = None      # 记录「顺便建了库/表」的事实，供 /health 展示
         self._local = threading.local()  # 每线程复用一个连接（之前是每个请求都新建连接）
@@ -98,23 +109,22 @@ class Database:
     # ------------------------------------------------------------------ 连接
     @property
     def placeholder(self) -> str:
-        return "%s" if self.dialect == "mysql" else "?"
+        """参数占位符：MySQL 用 %s（sqlite/SQL Server 的 `?` 分支已移除）。"""
+        return "%s"
 
     def _ping(self, conn) -> bool:
+        """探活：连接超时或数据库重启过时会失败，调用方据此决定重连。"""
         try:
-            if self.dialect == "mysql":
-                conn.ping(reconnect=False)
-            elif self.dialect == "sqlite":
-                conn.execute("SELECT 1")
-            else:
-                conn.cursor().execute("SELECT 1")
+            conn.ping(reconnect=False)
             return True
         except Exception:
             return False
 
     def _connect(self, require_db: bool = True):
+        """取本线程的连接。require_db=False 时连到 master（建库前用）。"""
         cfg = self.cfg
         cached = getattr(self._local, "conn", None)
+        # 缓存的连接必须与本次的 require_db 一致：连到 master 的连接不能拿去做业务查询
         if cached is not None and getattr(self._local, "req_db", None) == require_db:
             if self._ping(cached):
                 return cached
@@ -129,40 +139,25 @@ class Database:
         return conn
 
     def _connect_new(self, require_db: bool = True):
+        """建立 MySQL 连接；缺驱动 / 连不上统一抛 DBUnavailable（调用方据此降级）。
+
+        `require_db=False` 用于"库还不存在"的首次启动：先连到服务器，再执行
+        `schema_mysql.sql` 里的 CREATE DATABASE + USE。
+        """
         cfg = self.cfg
-        if self.dialect == "sqlite":
-            conn = sqlite3.connect(str(cfg.sqlite_path), timeout=15)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")     # 让外键顺序真的被校验
-            return conn
-
-        if self.dialect == "mysql":
-            try:
-                import pymysql
-            except ImportError as exc:
-                raise DBUnavailable("缺少 pymysql 驱动：pip install pymysql") from exc
-            kwargs = dict(host=cfg.db_host, port=cfg.db_port, user=cfg.db_user,
-                          password=cfg.db_password, charset="utf8mb4", autocommit=False)
-            if require_db:
-                kwargs["database"] = cfg.db_name
-            try:
-                return pymysql.connect(**kwargs)
-            except Exception as exc:
-                raise DBUnavailable(
-                    f"MySQL 连接失败({cfg.db_host}:{cfg.db_port}/{cfg.db_name if require_db else '-'})：{exc}") from exc
-
         try:
-            import pyodbc
+            import pymysql
         except ImportError as exc:
-            raise DBUnavailable("缺少 pyodbc 驱动：pip install pyodbc") from exc
-        auth = ("Trusted_Connection=yes;" if cfg.db_trusted else f"UID={cfg.db_user};PWD={cfg.db_password};")
-        db = cfg.db_name if require_db else "master"
-        cs = (f"DRIVER={{{cfg.db_odbc_driver}}};SERVER={cfg.db_host},{cfg.db_port};DATABASE={db};"
-              f"{auth}Encrypt=no;TrustServerCertificate=yes;")
+            raise DBUnavailable("缺少 pymysql 驱动：pip install pymysql") from exc
+        kwargs = dict(host=cfg.db_host, port=cfg.db_port, user=cfg.db_user,
+                      password=cfg.db_password, charset="utf8mb4", autocommit=False)
+        if require_db:
+            kwargs["database"] = cfg.db_name
         try:
-            return pyodbc.connect(cs, timeout=8)
+            return pymysql.connect(**kwargs)
         except Exception as exc:
-            raise DBUnavailable(f"SQL Server 连接失败({db})：{exc}") from exc
+            raise DBUnavailable(
+                f"MySQL 连接失败({cfg.db_host}:{cfg.db_port}/{cfg.db_name if require_db else '-'})：{exc}") from exc
 
     @contextmanager
     def cursor(self, commit: bool = False):
@@ -187,24 +182,20 @@ class Database:
 
     # -------------------------------------------------------------- 建表/体检
     def ensure_schema(self) -> None:
-        """幂等建表：三个方言各跑各自的脚本（脚本本身都可重复执行）。"""
+        """幂等建表（**只用 MySQL**）：执行 sql/schema_mysql.sql。
+
+        脚本里全部是 `CREATE TABLE IF NOT EXISTS`，可重复执行；库不存在时会自动创建。
+        """
         if self._schema_ready:
             return
 
-        if self.dialect == "sqlite":
-            sql = (self.cfg.sql_dir / "schema_sqlite.sql").read_text(encoding="utf-8")
-            with self.cursor(commit=True) as cur:
-                cur.executescript(sql)
-            self.last_bootstrap = f"sqlite 镜像表就绪：{self.cfg.sqlite_path}"
-
-        elif self.dialect == "mysql":
-            sql = (self.cfg.sql_dir / "schema_mysql.sql").read_text(encoding="utf-8")
-            try:
-                conn = self._connect()                      # 库已存在
-            except DBUnavailable:
-                conn = self._connect(require_db=False)      # 库还不存在：脚本里有 CREATE DATABASE + USE
-                self.last_bootstrap = f"MySQL 库 {self.cfg.db_name} 由 schema_mysql.sql 顺手创建"
-            try:
+        sql = (self.cfg.sql_dir / "schema_mysql.sql").read_text(encoding="utf-8")
+        try:
+            conn = self._connect()                      # 库已存在
+        except DBUnavailable:
+            conn = self._connect(require_db=False)      # 库还不存在：脚本里有 CREATE DATABASE + USE
+            self.last_bootstrap = f"MySQL 库 {self.cfg.db_name} 由 schema_mysql.sql 顺手创建"
+        try:
                 cur = conn.cursor()
                 for stmt in _statements(sql):
                     cur.execute(stmt)
@@ -238,6 +229,7 @@ class Database:
         self._schema_ready = True
 
     def ping(self) -> dict:
+        """体检：顺便建表 + 取行数，**永远返回 dict 不抛异常**（/health 靠它保持可用）。"""
         try:
             self.ensure_schema()
             counts = self.table_counts()
@@ -252,13 +244,16 @@ class Database:
 
     # ------------------------------------------------------------------ 写入
     def _insert_returning_id(self, cur, sql: str, params: tuple) -> int:
+        """执行 INSERT 并返回自增主键。"""
         cur.execute(sql, params)
+        # SQL Server 没有 lastrowid，要单独取 SCOPE_IDENTITY()（限定当前作用域，避免取到别处的 identity）
         if self.dialect == "sqlserver":
             cur.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
             return int(cur.fetchone()[0])
         return int(cur.lastrowid)
 
     def _ph(self, n: int) -> str:
+        """生成 n 个占位符并用逗号连起来，如 "%s, %s, %s"（VALUES 子句用）。"""
         return ", ".join([self.placeholder] * n)
 
     def ensure_dataset(self, name: str, source: str | None = None, sample_count: int | None = None,
@@ -402,6 +397,7 @@ class Database:
 
     # ------------------------------------------------------------------ 读取
     def _rows_to_dicts(self, cur) -> list[dict]:
+        """把游标里剩下的行读成 [{列名: 值}]，值统一转成可 JSON 化的类型。"""
         cols = [d[0] for d in cur.description]
         return [{c: _jsonable(v) for c, v in zip(cols, row)} for row in cur.fetchall()]
 
@@ -425,6 +421,7 @@ class Database:
         return rows[0] if rows else None
 
     def training_by_id(self, training_id: int) -> dict | None:
+        """按主键取一次训练（显式传 training_id 做推理锚点时会用到）。"""
         self.ensure_schema()
         with self.cursor() as cur:
             cur.execute(f"SELECT * FROM Trainings WHERE TrainingID = {self.placeholder}", (training_id,))
@@ -432,42 +429,49 @@ class Database:
         return rows[0] if rows else None
 
     def recent_trainings(self, limit: int = 20) -> list[dict]:
+        """最近的训练记录（带模型名、数据集名，供列表页直接显示）。"""
         self.ensure_schema()
         cols = ("t.TrainingID, t.TrainName, t.Epochs, t.BatchSize, t.Accuracy, t.Loss, t.Status, t.ModelPath, "
                 "t.StartedDate, t.CompletedDate, t.CreatedDate, m.ModelName, d.DatasetName")
+        # 分页语法两种方言不同：SQL Server 用 TOP，其余用 LIMIT
         tail = "FROM Trainings t LEFT JOIN Models m ON m.ModelID = t.ModelID " \
                "LEFT JOIN Datasets d ON d.DatasetID = t.DatasetID ORDER BY t.TrainingID DESC"
-        sql = (f"SELECT TOP {int(limit)} {cols} {tail}" if self.dialect == "sqlserver"
-               else f"SELECT {cols} {tail} LIMIT {int(limit)}")
+        # 只用 MySQL：直接 LIMIT（原来的 SQL Server `TOP` 分支已移除）
+        sql = f"SELECT {cols} {tail} LIMIT {int(limit)}"
         with self.cursor() as cur:
             cur.execute(sql)
             return self._rows_to_dicts(cur)
 
     def recent_inference_tasks(self, limit: int = 20) -> list[dict]:
+        """最近的推理任务（带模型名）。"""
         self.ensure_schema()
         cols = ("k.InferenceTaskID, k.TaskName, k.TaskType, k.Status, k.Progress, k.TrainingID, "
                 "k.TargetDatasetID, k.ResultSummary, k.CreatedDate, k.CompletedDate, m.ModelName")
+        # 同上：LEFT JOIN 是必要的——上传/占位模型可能在 Models 里查不到
         tail = ("FROM InferenceTasks k LEFT JOIN Models m ON m.ModelID = k.ModelID "
                 "ORDER BY k.InferenceTaskID DESC")
-        sql = (f"SELECT TOP {int(limit)} {cols} {tail}" if self.dialect == "sqlserver"
-               else f"SELECT {cols} {tail} LIMIT {int(limit)}")
+        # 只用 MySQL：直接 LIMIT（原来的 SQL Server `TOP` 分支已移除）
+        sql = f"SELECT {cols} {tail} LIMIT {int(limit)}"
         with self.cursor() as cur:
             cur.execute(sql)
             return self._rows_to_dicts(cur)
 
     def inference_task(self, task_id: int) -> dict | None:
+        """取一个推理任务及其全部结果明细（明细挂在返回值的 results 里）。"""
         self.ensure_schema()
         with self.cursor() as cur:
             cur.execute(f"SELECT * FROM InferenceTasks WHERE InferenceTaskID = {self.placeholder}", (task_id,))
             tasks = self._rows_to_dicts(cur)
             if not tasks:
                 return None
+            # 明细可能很多行，按 ResultID 排序保证点开顺序稳定
             cur.execute(f"SELECT * FROM InferenceResults WHERE InferenceTaskID = {self.placeholder} ORDER BY ResultID",
                         (task_id,))
             tasks[0]["results"] = self._rows_to_dicts(cur)
         return tasks[0]
 
     def models_in_db(self) -> list[dict]:
+        """Models 表的全部登记行（供模型清单与「系统管理→数据库」页读）。"""
         self.ensure_schema()
         with self.cursor() as cur:
             cur.execute("SELECT ModelID, ModelName, Description, ApiEndpoint, ModelType, Status, IsActive "
@@ -479,8 +483,8 @@ class Database:
         self.ensure_schema()
         cols = ("DatasetID, DatasetName, Source, SampleCount, ClassCount, DataPath, Description, CreatedDate")
         tail = "FROM Datasets ORDER BY DatasetID"
-        sql = (f"SELECT TOP {int(limit)} {cols} {tail}" if self.dialect == "sqlserver"
-               else f"SELECT {cols} {tail} LIMIT {int(limit)}")
+        # 只用 MySQL：直接 LIMIT（原来的 SQL Server `TOP` 分支已移除）
+        sql = f"SELECT {cols} {tail} LIMIT {int(limit)}"
         with self.cursor() as cur:
             cur.execute(sql)
             return self._rows_to_dicts(cur)
@@ -510,6 +514,7 @@ class Database:
                     ("ModelDeployments", ("DeployedPath", "DeployUrl")))
 
     def _count(self, cur, sql: str, params: tuple) -> int:
+        """执行 COUNT(*) 取标量（引用统计到处要用，单拎出来）。"""
         cur.execute(sql, params)
         row = cur.fetchone()
         return int(row[0]) if row else 0
@@ -532,6 +537,7 @@ class Database:
                     "total": sum(refs.values()), "deletable": sum(refs.values()) == 0}
 
     def model_exists(self, name: str) -> bool:
+        """Models 表里有没有这个名字（改名查重、上传登记都会用）。"""
         self.ensure_schema()
         with self.cursor() as cur:
             cur.execute(f"SELECT ModelID FROM Models WHERE ModelName = {self.placeholder}", (name,))
@@ -609,12 +615,14 @@ class Database:
         return {"deleted": name, "cascaded": bool(force and refs["total"]), "references": refs["references"]}
 
     def dataset_references(self, dataset_id: int) -> dict:
+        """某数据集被哪些表引用了多少行（删数据集前先看这个）。"""
         self.ensure_schema()
         with self.cursor() as cur:
             cur.execute(f"SELECT DatasetID, DatasetName FROM Datasets WHERE DatasetID = {self.placeholder}", (dataset_id,))
             row = cur.fetchone()
             if not row:
                 raise DBError(f"DatasetID={dataset_id} 不存在")
+            # 只有两处引用：训练记录的学习数据、推理任务的目标数据
             refs = {
                 "Trainings": self._count(cur, f"SELECT COUNT(*) FROM Trainings WHERE DatasetID = {self.placeholder}", (dataset_id,)),
                 "InferenceTasks": self._count(cur, f"SELECT COUNT(*) FROM InferenceTasks WHERE TargetDatasetID = {self.placeholder}", (dataset_id,)),
@@ -623,6 +631,10 @@ class Database:
                     "total": sum(refs.values()), "deletable": sum(refs.values()) == 0}
 
     def update_dataset(self, dataset_id: int, fields: dict) -> dict:
+        """按要求改 Datasets 的列（只认白名单字段，避免把任意列名拼进 SQL）。
+
+        DatasetName 单独处理：它不在 _DATASET_FIELDS 里，但有唯一约束需要判重。
+        """
         self.ensure_schema()
         sets, params = [], []
         for col in self._DATASET_FIELDS:
@@ -642,6 +654,11 @@ class Database:
         return {"updated": dataset_id, "fields": [s.split(" =")[0] for s in sets]}
 
     def delete_dataset(self, dataset_id: int, force: bool = False) -> dict:
+        """删 Datasets 登记行。有引用时默认拒绝，force=True 才连带清理。
+
+        注意与删模型不同：这里**不能**直接删掉 Trainings（那是历史记录），
+        而是把 Trainings.DatasetID 置空，只清理属于该数据集的推理任务与结果。
+        """
         self.ensure_schema()
         refs = self.dataset_references(dataset_id)
         if refs["total"] and not force:

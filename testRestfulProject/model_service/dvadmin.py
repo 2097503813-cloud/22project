@@ -29,9 +29,12 @@ from flask import Blueprint, jsonify, request
 
 # 五个模块（后端控制路由：前端的 dynamicRoutes[0].children 会被这份数据替换）
 def _menu_payload() -> list[dict]:
-    # 注意：这里**不要**再放"首页"。模板里 stores/frontendMenu.ts 已经写死了一个 /home
-    # （已改为指向本平台的 platform/home/index），两边都下发就会出现"两个首页"。
-    # 路由守卫登录成功后 next('/home')、dynamicRoutes[0].redirect 也是 /home，与它一致。
+    """下发侧边栏菜单（真正的"后端控制路由"）。
+
+    这里**不要**再放"首页"。模板里 stores/frontendMenu.ts 已经写死了一个 /home
+    （已改为指向本平台的 platform/home/index），两边都下发就会出现"两个首页"。
+    路由守卫登录成功后 next('/home')、dynamicRoutes[0].redirect 也是 /home，与它一致。
+    """
     modules = [
         (102, "模型管理", "ele-Cpu", "/platform/model", "platformModel", "platform/model/index", False),
         (103, "数据集管理", "ele-Coin", "/platform/dataset", "platformDataset", "platform/dataset/index", False),
@@ -50,10 +53,12 @@ def _menu_payload() -> list[dict]:
 
 
 def _ok(data=None, msg: str = "success"):
+    """dvadmin 信封：{code, data, msg}，code=2000 表示成功（前端 axios 拦截器按这个判断）。"""
     return jsonify({"code": 2000, "data": data, "msg": msg})
 
 
 def _user_payload() -> dict:
+    """本地演示账号。字段名要跟前端 user store 的期望对齐，缺字段会导致页头/权限判断报错。"""
     return {
         "id": 1, "username": "admin", "name": "管理员", "avatar": "",
         "email": "admin@localhost", "mobile": "", "gender": "1",
@@ -65,10 +70,12 @@ def _user_payload() -> dict:
 
 
 def build_blueprint() -> Blueprint:
+    """把 dvadmin 需要的最小接口集合装进一个 Blueprint。"""
     bp = Blueprint("dvadmin", __name__)
 
     @bp.post("/api/login/")
     def login():
+        """登录：只做形式校验（任意非空账号口令都通过），返回 user + 两个 token。"""
         body = request.get_json(silent=True) or {}
         username = (body.get("username") or "").strip()
         if not username:
@@ -85,15 +92,18 @@ def build_blueprint() -> Blueprint:
 
     @bp.post("/api/logout/")
     def logout():
+        """退出。没有会话要清，直接把前端领到"已退出"分支即可。"""
         return _ok(None, "已退出")
 
     @bp.get("/api/system/user/user_info/")
     def user_info():
+        """当前登录用户信息（前端每次刷新都会拉一次）。"""
         return _ok(_user_payload())
 
     @bp.post("/api/system/user/update_user_info/")
     @bp.put("/api/system/user/update_user_info/")
     def update_user_info():
+        """改个人资料：把请求体合并进默认账号后原样返回（本地演示不落库）。"""
         data = dict(_user_payload())
         data.update(request.get_json(silent=True) or {})
         return _ok(data, "已更新（本地演示不会真的落库）")
@@ -102,6 +112,7 @@ def build_blueprint() -> Blueprint:
     @bp.put("/api/system/user/change_password/")
     @bp.post("/api/system/user/login_change_password/")
     def change_password():
+        """改密码：三个路由都指向这里，统一回复成功，避免前端弹错。"""
         return _ok(None, "本地演示环境不需要改密码")
 
     @bp.post("/api/system/file/")
@@ -144,6 +155,7 @@ def build_blueprint() -> Blueprint:
 
     @bp.get("/api/system/menu/web_router/")
     def web_router():
+        """动态菜单：后端控制路由的入口。"""
         return _ok(_menu_payload())
 
     @bp.get("/sse/")
@@ -158,36 +170,43 @@ def build_blueprint() -> Blueprint:
 
     @bp.get("/api/init/dictionary/")
     def dictionary():
+        """数据字典。data 必须是**数组**（前端会 forEach/映射）。"""
         return _ok([], "本地演示环境暂无字典数据")
 
     @bp.get("/api/init/settings/")
     def settings():
+        """系统设置。前端把这个对象直接当字典读，例如 systemConfig['base.captcha_state']。"""
         # 前端把这个对象直接当字典读，例如 systemConfig['base.captcha_state']
         return _ok({"base.captcha_state": False, "base.site_name": "轴承故障诊断平台",
                     "base.login_title": "轴承故障诊断平台"})
 
     @bp.get("/api/system/menu_button/menu_button_all_permission/")
     def menu_button_all_permission():
+        """按钮级权限清单：前端拿到后逐条 forEach，所以必须是数组。"""
         # 按钮权限清单：前端拿到后逐条 forEach，必须是数组
         return _ok([], "本地演示环境不做按钮级权限")
 
     @bp.get("/api/system/message_center/get_newest_msg/")
     @bp.get("/api/system/message_center/get_self_receive/")
     def message_center():
+        """站内消息：两个路由合并，固定回空数组。"""
         return _ok([], "无消息")
 
     @bp.get("/api/captcha/")
     def captcha():
+        """验证码：captcha_state=false 时登录页不显示验证码框。"""
         # None → 登录页的 isShowCaptcha 为假，不显示验证码框
         return _ok({"captcha_state": False, "key": None, "image_base64": None})
 
     @bp.get("/api/system/system_config/get_table_data/")
     def system_config():
+        """系统配置表（另一条取配置的路径，与 /api/init/settings/ 给同样的值）。"""
         return _ok({"base.captcha_state": False, "base.site_name": "轴承故障诊断平台"})
 
     @bp.get("/api/system/dept/all_dept/")
     @bp.get("/api/system/dept/dept_all/")
     def all_dept():
+        """部门树（两个路由合并）。data 必须是数组且每项带 id/parent，前端才能建树。"""
         # 前端用 XEUtils.toArrayTree(ret.data, {parentKey:'parent'}) 建树：
         # data 必须是**数组**，且每项要有 id / parent（之前返回 {results,total} 会报
         # "Cannot create property 'id' on number '0'"）
@@ -196,12 +215,14 @@ def build_blueprint() -> Blueprint:
 
     @bp.get("/api/dvadmin3_social_oauth2/backend/get_login_backend/")
     def login_backend():
+        """第三方登录后端列表：空数组 = 登录页不显示第三方登录入口。"""
         return _ok([], "未启用第三方登录")
 
     @bp.get("/api/system/role/")
     @bp.get("/api/system/user/")
     @bp.get("/api/system/area/")
     def fast_crud_list():
+        """fast-crud 的通用分页列表（角色/用户/地区三个列表共用）。"""
         # fast-crud 的分页列表约定：{results, total}
         return _ok({"results": [], "total": 0}, "本地演示环境暂无数据")
 
@@ -242,6 +263,11 @@ def register_dvadmin(app) -> None:
 
     @app.after_request
     def _cors(response):                       # noqa: ANN001
+        """给**所有**响应补 CORS 头。
+
+        Allow-Origin 回显请求里的 Origin（而不是写死 *）并配 Allow-Credentials=true ——
+        带 cookie 的跨域请求不允许 Origin 为 *，写死会让浏览器直接拒绝。
+        """
         response.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"

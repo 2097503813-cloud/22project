@@ -9,13 +9,16 @@
 <!-- 字体只是锦上添花：离线自动回落系统字体，本平台零构建、零前端依赖 -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&family=Lora:wght@500;600&display=swap">
 <style>
+/* 全部样式内联在一个 <style> 里：不引任何 CSS 框架、不走打包器。
+   配色用 CSS 变量集中在 :root，改主题只动这一处 */
 :root{
+  /* 米色底 + 橙红强调色（Anthropic 风格），错误/正常/警告各有一个语义色 */
   --color-bg-base:#ECE9E0; --color-surface:#F7F5EF; --color-surface-2:#E4E0D5;
   --color-accent-orange:#D97757; --color-on-accent:#FFF8F4;
   --color-text-primary:#141413; --color-text-secondary:#6B6860;
   --color-error:#C0453A; --color-ok:#4F7A4A; --color-warn-bg:rgba(217,119,87,.12); --color-warn-border:rgba(217,119,87,.35);
-  --font-display:'Lora',Georgia,'Songti SC',serif;
-  --font-heading:'Poppins','Segoe UI','Microsoft YaHei',sans-serif;
+  --font-display:'Lora',Georgia,'Songti SC',serif;              /* 标题：衬线 */
+  --font-heading:'Poppins','Segoe UI','Microsoft YaHei',sans-serif;   /* 正文：无衬线 */
   --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-6:24px; --space-8:32px;
   --radius:10px; --line:#D6D1C4; --sidebar-w:212px;
 }
@@ -27,6 +30,7 @@ a{color:var(--color-accent-orange)}
 .mono,code,pre{font-family:Consolas,'SFMono-Regular',Menlo,monospace; font-size:12px}
 
 /* ===== 骨架 ===== */
+/* .sidebar 固定宽度贴左侧，.main 里放标题栏与各模块内容 */
 .app{display:flex; min-height:100vh}
 .sidebar{width:var(--sidebar-w); flex:0 0 var(--sidebar-w); background:var(--color-surface);
   border-right:1px solid var(--line); display:flex; flex-direction:column; position:sticky; top:0; height:100vh}
@@ -55,6 +59,7 @@ a{color:var(--color-accent-orange)}
 .dot.bad{background:var(--color-error)}
 
 /* ===== 模块与子页签 ===== */
+/* 切页靠切换 .active 类：.module 一次只显示一个，.subpanel 是模块内的子页 */
 .module{display:none}
 .module.active{display:block}
 .subtabs{display:flex; gap:var(--space-1); border-bottom:1px solid var(--line); margin-bottom:var(--space-6); flex-wrap:wrap}
@@ -66,6 +71,7 @@ a{color:var(--color-accent-orange)}
 .subpanel.active{display:block}
 
 /* ===== 卡片/网格 ===== */
+/* .cols-N 都用 auto-fit：窗口窄了自动折行，不用写媒体查询 */
 .grid{display:grid; gap:var(--space-4)}
 .cols-2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
 .cols-3{grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
@@ -75,7 +81,7 @@ a{color:var(--color-accent-orange)}
 .card h4{font-size:13px; margin-bottom:var(--space-2); color:var(--color-text-secondary); font-family:var(--font-heading)}
 .hint{color:var(--color-text-secondary); font-size:12px}
 .card+.card{margin-top:var(--space-4)}
-.kpi{font-family:var(--font-display); font-size:30px; line-height:1.1; margin:2px 0}
+.kpi{font-family:var(--font-display); font-size:30px; line-height:1.1; margin:2px 0}   /* KPI 大数字 */
 .actions{display:flex; gap:var(--space-2); flex-wrap:wrap; margin-top:var(--space-3)}
 .empty{color:var(--color-text-secondary); text-align:center; padding:var(--space-6) 0; font-size:13px}
 .warn{background:var(--color-warn-bg); border:1px solid var(--color-warn-border); color:#8A4A31;
@@ -100,30 +106,38 @@ button.btn.ghost{background:transparent}
 button.btn.small{padding:4px 10px; font-size:12px}
 
 /* ===== 表格 ===== */
+/* 页面里几乎所有表都由 JS 的 table() 生成，这里只定义通用外观；
+   td.num / th.num 是数字列（右对齐 + 等宽数字，方便上下比对） */
 table{width:100%; border-collapse:collapse; font-size:13px}
 th,td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top}
 th{font-size:12px; color:var(--color-text-secondary); font-weight:500; white-space:nowrap}
 tbody tr:hover{background:var(--color-surface-2)}
 td.num,th.num{text-align:right; font-variant-numeric:tabular-nums}
-.hit{color:var(--color-ok); font-weight:600}
-.miss{color:var(--color-error); font-weight:600}
+.hit{color:var(--color-ok); font-weight:600}      /* 预测命中 */
+.miss{color:var(--color-error); font-weight:600}  /* 预测未命中 / 出错文案 */
+/* .tag 是状态小胶囊：默认灰，.ok 绿，.bad 红（成功/失败、正常/偏短…） */
 .tag{display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; background:var(--color-surface-2); color:var(--color-text-secondary); white-space:nowrap}
 .tag.ok{background:rgba(79,122,74,.14); color:var(--color-ok)}
 .tag.bad{background:rgba(192,69,58,.14); color:var(--color-error)}
+/* .kv 是"键值对列表"（dt/dd 两列网格），用于首页体检、训练/推理结果概要 */
 .kv{display:grid; grid-template-columns:auto 1fr; gap:5px 16px; font-size:13px}
 .kv dt{color:var(--color-text-secondary); white-space:nowrap}
 .kv dd{margin:0; font-variant-numeric:tabular-nums; word-break:break-all}
+/* JSON / 日志用深色块，内部滚动，避免长内容把页面撑长 */
 pre.json{background:var(--color-text-primary); color:var(--color-bg-base); padding:var(--space-3); border-radius:8px;
   overflow:auto; max-height:320px; font-size:12px; line-height:1.5}
 pre.log{background:var(--color-text-primary); color:var(--color-bg-base); padding:var(--space-3); border-radius:8px;
   overflow:auto; max-height:520px; font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-all}
 details{border-top:1px solid var(--line); padding-top:var(--space-3); margin-top:var(--space-3)}
 summary{cursor:pointer; font-size:12px; color:var(--color-text-secondary)}
+/* .status 是按钮旁那行"训练中…/已完成"的提示文字 */
 .status{margin-top:var(--space-3); font-size:12px; color:var(--color-text-secondary); min-height:18px}
 .status.err{color:var(--color-error)}
 .status.busy{color:var(--color-accent-orange)}
 
 /* ===== 图与波形 ===== */
+/* .fig 是图卡（缩略图 + 文件名），点击进 .lightbox 全屏看；
+   canvas.wave 是「数据展示」页手画的信号波形 */
 .figs{display:grid; gap:var(--space-3); grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
 .fig{background:var(--color-surface); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; cursor:zoom-in}
 .fig img{display:block; width:100%; height:165px; object-fit:contain; background:var(--color-surface-2)}
@@ -133,6 +147,7 @@ canvas.wave{width:100%; height:300px; background:#FFFDF8; border:1px solid var(-
 .lightbox{position:fixed; inset:0; background:rgba(20,20,19,.82); display:none; z-index:50; padding:var(--space-6); cursor:zoom-out}
 .lightbox.on{display:flex; align-items:center; justify-content:center; flex-direction:column; gap:var(--space-3)}
 .lightbox img{max-width:96vw; max-height:88vh; background:#fff; border-radius:8px}
+/* .toast 右下角浮层提示，靠加 .on 淡入；.err 变红且由 toast() 延长停留时间 */
 .toast{position:fixed; right:var(--space-6); bottom:var(--space-6); z-index:60; background:var(--color-text-primary);
   color:var(--color-on-accent); padding:10px 16px; border-radius:8px; font-size:13px; opacity:0; transform:translateY(8px);
   transition:all .2s ease; max-width:520px}
@@ -480,50 +495,60 @@ canvas.wave{width:100%; height:300px; background:#FFFDF8; border:1px solid var(-
 
 <script>
 /* ============================== 基础 ============================== */
-const $ = id => document.getElementById(id);
+/* 单页控制台：无框架、无构建、无 npm，一个 HTML 由 Flask 从 /ui 直接吐出。
+   页面结构 = 侧边栏 + 若干 .module 块，同一时刻只有一个是 .active；
+   数据全部来自 model_service 的裸 JSON 接口（不走 dvadmin 兼容层）。 */
+
+/* --- 小工具 --- */
+const $ = id => document.getElementById(id);                       // document.getElementById 简写
+// HTML 转义：所有来自接口的字符串都要过一遍，否则日志/错误信息里的 < > 会把页面结构冲掉
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const num = (v, d = 4) => (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d);
+const num = (v, d = 4) => (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d);   // 定小数位，空值显示破折号
 const kb = v => (v === null || v === undefined) ? '—' : (v >= 1024 ? (v / 1024).toFixed(2) + ' MB' : v + ' KB');
 
 let toastTimer = null;
-function toast(msg, isErr) {
+function toast(msg, isErr) {                                       // 右下角提示；错误停留更久
   const el = $('toast'); el.textContent = msg; el.className = 'toast on' + (isErr ? ' err' : '');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('on'), isErr ? 6000 : 3200);
 }
 function setStatus(id, text, kind) { const el = $(id); el.textContent = text || ''; el.className = 'status' + (kind ? ' ' + kind : ''); }
-function confirmDanger(text) { return window.confirm(text); }
+function confirmDanger(text) { return window.confirm(text); }      // 危险操作（删模型/清图库）统一二次确认
 
+/* 统一的请求出口：把 HTTP 错误变成带 payload 的 Error，调用方只需 try/catch + e.message */
 async function api(path, options) {
   const res = await fetch(path, options);
   const text = await res.text();
   let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch (e) { data = { raw: text }; }
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = { raw: text }; }   // 非 JSON 响应（如 500 的 HTML）也兜住
   if (!res.ok) {
     const err = new Error((data && (data.error || data.message)) || ('HTTP ' + res.status));
-    err.payload = data; err.status = res.status; throw err;
+    err.payload = data; err.status = res.status; throw err;        // payload 里带着后端给的 hint/traceback
   }
   return data;
 }
 const post = (p, b) => api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) });
 const del = (p) => api(p, { method: 'DELETE' });
-function zoom(url) { $('lightboxImg').src = url; $('lightbox').classList.add('on'); }
+function zoom(url) { $('lightboxImg').src = url; $('lightbox').classList.add('on'); }   // 点图放大
+// 一张图卡（缩略图 + 文件名 + 大小），点击调 zoom()
 const figCard = f => `<div class="fig" onclick="zoom('${f.url}')">
     <img src="${f.url}" alt="${esc(f.name)}" loading="lazy">
     <div class="cap"><span title="${esc(f.file || f.name)}">${esc(f.name)}</span><span>${f.size_kb ?? ''} KB</span></div></div>`;
+// 通用表格渲染：cols 决定表头（num:1 表示该列右对齐），rows 是已经转义好的 HTML 二维数组
 const table = (cols, rows) => `<table><thead><tr>${cols.map(c => `<th class="${c.num ? 'num' : ''}">${c.t}</th>`).join('')}</tr></thead>
   <tbody>${rows.map(r => `<tr>${r.map((cell, i) => `<td class="${cols[i].num ? 'num' : ''}">${cell}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 
 /* ============================ 导航 ============================ */
 const TITLES = { home: '首页', model: '模型管理', dataset: '数据集管理', visual: '数据展示', system: '系统管理' };
-const SUBS = {
+const SUBS = {                                                     // 每个模块下的子标签（与 dvadmin 的菜单一一对应）
   model: { list: '模型清单', train: '训练', predict: '推理', trainings: '训练记录', tasks: '推理任务' },
   dataset: { inspect: '数据集体检', tabular: '表格数据集', register: '库表登记' },
   visual: { signal: '信号浏览', gallery: '图库' },
   system: { runtime: '运行信息', database: '数据库', logs: '日志', api: '接口索引', maintain: '维护' },
 };
-const FIRST_SUB = { model: 'list', dataset: 'inspect', visual: 'signal', system: 'runtime' };
-const state = { module: 'home', sub: {} };
+const FIRST_SUB = { model: 'list', dataset: 'inspect', visual: 'signal', system: 'runtime' };   // 模块默认落在哪个子标签
+const state = { module: 'home', sub: {} };                         // 记着每个模块上次看的是哪个子标签
 
+/* 切页：模块按钮 / 子标签 / 面包屑 / 页面标题一起换，然后触发该页的数据加载 */
 function go(module, sub) {
   state.module = module;
   if (sub) state.sub[module] = sub;
@@ -544,6 +569,7 @@ document.querySelectorAll('#nav button').forEach(b => b.addEventListener('click'
 document.querySelectorAll('.subtab').forEach(b => b.addEventListener('click',
   () => go(b.closest('.subtabs').dataset.group, b.dataset.sub)));
 
+/* 每页进入时各自要拉哪几个接口。注意有的子页要拉多个（如「训练」要先有数据集清单可选） */
 function loadFor(module, sub) {
   if (module === 'home') { loadHome(); return; }
   if (module === 'model') {
@@ -571,10 +597,13 @@ function loadFor(module, sub) {
 }
 
 /* ============================ 首页 ============================ */
+/* 三个接口各拉一份：/health（KPI 与体检）、/trainings（最近 5 条）、/inference-tasks（最近 5 条）。
+   三块互不依赖，各自 try/catch —— 库连不上时首页仍要能显示服务与产物信息，而不是整页空白 */
 async function loadHome() {
   try {
     const h = await api('/health');
     const db = h.database || {}, counts = db.counts || {};
+    // KPI 数字来自 /health 里的一次性汇总（表行数 + 产物数）
     $('homeKpi').innerHTML = [
       ['模型产物', h.artifacts?.count ?? 0, 'data/models 下已落盘的版本数'],
       ['训练次数', counts.Trainings ?? '—', 'Trainings 表行数'],
@@ -598,7 +627,7 @@ async function loadHome() {
     $('homeTrainings').innerHTML = t.length ? table(
       [{ t: 'ID', num: 1 }, { t: '模型' }, { t: '训练名' }, { t: '轮次', num: 1 }, { t: '准确率', num: 1 }, { t: '状态' }, { t: '开始' }],
       t.map(x => [x.TrainingID, esc(x.ModelName), `<span class="mono">${esc(x.TrainName)}</span>`,
-        x.Epochs ?? '—', x.Accuracy != null ? num(x.Accuracy) : '—',
+        x.Epochs ?? '—', x.Accuracy != null ? num(x.Accuracy) : '—',     // null 而非 0：0 也是合法准确率，不能用 falsy 判断
         x.Status === '成功' ? '<span class="tag ok">成功</span>' : `<span class="tag bad">${esc(x.Status)}</span>`,
         `<span class="mono">${esc(x.StartedDate || '')}</span>`])) : '<div class="empty">还没有训练记录</div>';
   } catch (e) { $('homeTrainings').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
@@ -608,13 +637,14 @@ async function loadHome() {
     $('homeTasks').innerHTML = k.length ? table(
       [{ t: 'ID', num: 1 }, { t: '模型' }, { t: '类型' }, { t: '锚点训练', num: 1 }, { t: '进度', num: 1 }, { t: '状态' }, { t: '完成' }],
       k.map(x => [x.InferenceTaskID, esc(x.ModelName), `<span class="tag">${esc(x.TaskType)}</span>`,
-        x.TrainingID, (x.Progress ?? '—') + '%',
+        x.TrainingID, (x.Progress ?? '—') + '%',                          // 「锚点训练」= InferenceTasks.TrainingID
         x.Status === '成功' ? '<span class="tag ok">成功</span>' : `<span class="tag bad">${esc(x.Status)}</span>`,
         `<span class="mono">${esc(x.CompletedDate || '')}</span>`])) : '<div class="empty">还没有推理任务</div>';
   } catch (e) { $('homeTasks').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
 
 /* ========================= 模型管理 ========================= */
+/* 「模型清单」= 磁盘上的产物（/models 的 artifacts）+ 库表登记（db_models）两张表 */
 async function loadModels() {
   try {
     const m = await api('/models');
@@ -625,7 +655,7 @@ async function loadModels() {
       arts.map(a => [`<b>${esc(a.model)}</b>`, esc(a.version), `<span class="tag">${esc(a.framework)}</span>`,
         a.input_len ?? '—', a.num_classes ?? '—',
         a.metrics?.test_accuracy != null ? num(a.metrics.test_accuracy) : '—',
-        `<span class="mono">${esc((a.weights || '').split('\\').pop())}</span>`,
+        `<span class="mono">${esc((a.weights || '').split('\\').pop())}</span>`,   // 只显示文件名，完整路径太长
         `<button class="btn small ghost" onclick="viewArtifact('${esc(a.model)}')">meta</button>`])) +
       '<div class="hint" style="margin-top:8px">删除版本请到「系统管理 → 维护」。</div>'
       : '<div class="empty">还没有产物，去「训练」页跑一次</div>';
@@ -633,9 +663,10 @@ async function loadModels() {
       [{ t: 'ModelID', num: 1 }, { t: '模型' }, { t: '类型' }, { t: '接口' }, { t: '状态' }],
       m.db_models.map(d => [d.ModelID, esc(d.ModelName), `<span class="tag">${esc(d.ModelType)}</span>`,
         `<span class="mono">${esc(d.ApiEndpoint || '—')}</span>`, esc(d.Status)])) : '<div class="empty">无登记</div>';
-    if ($('dbModels2')) $('dbModels2').innerHTML = $('dbModelList').innerHTML;
+    if ($('dbModels2')) $('dbModels2').innerHTML = $('dbModelList').innerHTML;   // 「系统管理→数据库」页复用同一份 HTML
   } catch (e) { $('artifactList').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
+/* 点「meta」按钮：把该模型的 meta.json 原样铺在清单位置（再点「返回清单」还原） */
 async function viewArtifact(name) {
   try {
     const a = await api('/models/' + encodeURIComponent(name));
@@ -644,22 +675,26 @@ async function viewArtifact(name) {
       <button class="btn small ghost" onclick="loadModels()">返回清单</button>`;
   } catch (e) { toast(e.message, true); }
 }
+/* 切模型时把超参输入框刷成该模型的常用默认值（只是给个起点，用户仍可改） */
 function applyTrainDefaults() {
   const m = $('tModel').value;
   if (m === '1dcnn') { $('tEpochs').value = 10; $('tNumber').value = 600; }
   else if (m === 'cwt_cnn') { $('tEpochs').value = 50; $('tNumber').value = 300; }
   else { $('tEpochs').value = 1; }
 }
+/* 训练：把表单拼成 /train 的 body。
+   注意 /train 是**同步阻塞**的，所以这里用定时器显示已用时，让用户知道没卡死 */
 let trainTimer = null;
 async function doTrain() {
   const m = $('tModel').value, body = { model: m };
+  // 只有非空输入框才提交：留空 = 让后端用它自己的默认值（config.defaults）
   const push = (k, id, isNum) => { const v = $(id).value; if (v !== '') body[k] = isNum ? Number(v) : v; };
   ['epochs:tEpochs:1', 'seed:tSeed:1', 'length:tLength:1', 'number:tNumber:1', 'stride:tStride:1', 'batch_size:tBatch:1']
     .forEach(s => { const [k, id, n] = s.split(':'); push(k, id, n === '1'); });
   push('dataset', 'tDataset', false);
-  if (m === 'cwt_cnn') push('lr', 'tLr', true);
+  if (m === 'cwt_cnn') push('lr', 'tLr', true);          // 学习率只有 cwt_cnn 用得上
   body.strict = $('tStrict').value === 'true';
-  // 数据源：类型 + 目录 + 信号列（表格数据用）
+  // 数据源：类型 + 目录 + 信号列（表格数据用）。dataset_type=auto 时按所选目录里的实际文件自动判断
   const dirOpt = $('tDir')?.selectedOptions[0];
   if (dirOpt && dirOpt.value) {
     body.dataset_dir = dirOpt.value;
@@ -668,7 +703,7 @@ async function doTrain() {
   }
   if ($('tColumn').value.trim()) body.signal_column = $('tColumn').value.trim();
 
-  $('btnTrain').disabled = true;
+  $('btnTrain').disabled = true;                         // 训练期间禁用按钮，避免重复提交
   const t0 = Date.now();
   trainTimer = setInterval(() => setStatus('trainStatus',
     `训练中… 已用时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒（同步阻塞，请勿关闭页面）`, 'busy'), 200);
@@ -689,11 +724,12 @@ async function doTrain() {
       ${r.figures_error ? `<div class="warn" style="margin-top:12px">出图失败：${esc(r.figures_error)}</div>` : ''}`;
     $('trainFigs').innerHTML = (r.figures || []).length
       ? '<div class="figs">' + r.figures.map(figCard).join('') + '</div>' : '<div class="empty">本次没有生成图</div>';
+    // JSON 区把体积最大的两项折叠掉，否则 history/classification_report 会把页面撑爆
     $('trainJson').innerHTML = `<pre class="json">${esc(JSON.stringify({ ...r, metrics: { ...mm, history: '（省略）', classification_report: '（见下）' } }, null, 1))}</pre>` +
       (mm.classification_report ? `<details><summary>classification_report</summary><pre class="json">${esc(mm.classification_report)}</pre></details>` : '');
     setStatus('trainStatus', r.status === '成功' ? `训练完成，用时 ${r.duration_sec} 秒` : '训练失败：' + (r.error || ''), r.status === '成功' ? '' : 'err');
     toast(r.status === '成功' ? '训练完成，已落盘并写库' : '训练失败', r.status !== '成功');
-    refreshHealth(); loadModels();
+    refreshHealth(); loadModels();                       // 首页 KPI 与模型清单都会变
   } catch (e) {
     clearInterval(trainTimer);
     setStatus('trainStatus', '请求失败：' + e.message, 'err');
@@ -701,6 +737,7 @@ async function doTrain() {
     toast(e.message, true);
   } finally { $('btnTrain').disabled = false; }
 }
+/* 推理：结果按 task 分两种渲染——分类看类别+置信度+是否命中，异常检测看判定+异常分 */
 async function doPredict() {
   const body = { model: $('pModel').value, path: $('pFile').value,
     index: Number($('pIndex').value) || 0, limit: Number($('pLimit').value) || 1, top_k: Number($('pTopk').value) || 3 };
@@ -710,6 +747,7 @@ async function doPredict() {
     const r = await post('/predict', body);
     let rows;
     if (r.task === 'anomaly_detection') {
+      // 老格式产物才有 anomaly_points/points；新格式这两列会是 undefined
       rows = `<table><thead><tr><th>窗口</th><th>判定</th><th class="num">异常点占比</th><th class="num">异常/总点数</th></tr></thead><tbody>` +
         r.predictions.map(p => `<tr><td>${p.index}</td>
           <td><span class="tag ${p.is_anomaly ? 'bad' : 'ok'}">${esc(p.predicted_label)}</span></td>
@@ -719,6 +757,7 @@ async function doPredict() {
         <th class="num">真实</th><th>命中</th></tr></thead><tbody>` +
         r.predictions.map(p => {
           const t2 = (p.top_k || [])[1];
+          // 只有输入来自登记过的数据集文件时后端才带 actual_class；没有真值就不显示命中列
           const hit = p.actual_class == null ? '' :
             (p.predicted_class === p.actual_class ? '<span class="hit">命中</span>' : '<span class="miss">未命中</span>');
           return `<tr><td>${p.index}</td><td>${esc(p.predicted_label)}</td>
@@ -737,10 +776,12 @@ async function doPredict() {
     setStatus('predictStatus', '推理完成'); toast('推理完成，结果已写库'); refreshHealth();
   } catch (e) {
     setStatus('predictStatus', '失败：' + e.message, 'err');
+    // 失败时 e.payload 里通常带着 detail/hint（比如"哪个文件不是模型"），一并显示
     $('predictResult').innerHTML = `<div class="miss">${esc(e.message)}</div><pre class="json">${esc(JSON.stringify(e.payload || {}, null, 1))}</pre>`;
     toast(e.message, true);
   } finally { $('btnPredict').disabled = false; }
 }
+/* 训练记录 / 推理任务：只读列表，数据来自库表 */
 async function loadTrainings() {
   try {
     const d = await api('/trainings?limit=20'), rows = d.trainings || [];
@@ -768,6 +809,7 @@ async function loadTasks() {
         `<button class="btn small" onclick="loadTaskDetail(${k.InferenceTaskID})">明细</button>`])) : '<div class="empty">还没有推理任务</div>';
   } catch (e) { $('recTasks').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
+/* 展开某个推理任务：任务头 + InferenceResults 明细（分类/异常检测共用一张表，列按需显示） */
 async function loadTaskDetail(id) {
   try {
     const t = await api('/inference-tasks/' + id), rows = t.results || [];
@@ -785,6 +827,8 @@ async function loadTaskDetail(id) {
 }
 
 /* ======================= 数据集管理 / 数据展示 ======================= */
+/* 一次 /datasets 拿到两种数据源的体检结果（matlab + 上传的表格），
+   后面多个页面共用它：体检页、训练页的目录下拉、推理页/信号页的文件下拉 */
 let DATASETS = {}, DATASET_KEYS = [], LAST_KEYS = '';
 async function loadDatasets() {
   try {
@@ -794,7 +838,7 @@ async function loadDatasets() {
     const keysChanged = DATASET_KEYS.join('|') !== LAST_KEYS;
     LAST_KEYS = DATASET_KEYS.join('|');
     if ($('dsPick') && (keysChanged || !$('dsPick').options.length)) {
-      const keep = $('dsPick').value;
+      const keep = $('dsPick').value;                  // 重建后尽量保持用户原来的选择
       $('dsPick').innerHTML = DATASET_KEYS.map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
       if (DATASET_KEYS.includes(keep)) $('dsPick').value = keep;
     }
@@ -803,7 +847,7 @@ async function loadDatasets() {
     const ds = DATASETS[key] || {};
     const files = (ds.files || []).filter(f => f.on_disk);
     const isTabular = ds.dataset_type === 'tabular';
-    // 体检 KPI + 表格
+    // 体检 KPI + 文件表（两种数据源的列不一样：.mat 看采样点，表格看行列数）
     if ($('dsKpi')) {
       const shortByRows = isTabular
         ? ['最短文件', ds.min_rows ?? '—', '行数最少的文件']
@@ -828,10 +872,12 @@ async function loadDatasets() {
              f.error ? `<span class="tag bad">读取失败</span>` : '<span class="tag ok">正常</span>']
           : [`<span class="mono">${esc(f.filename)}</span>`, esc(f.label), f.class_id ?? '—',
              f.samples_in_file ?? '—', Math.floor((f.samples_in_file || 0) / 784),
+             // 10 万点以下就标"偏短"：IR014 只有 63788 点，默认参数下会有窗口被跳过
              (f.samples_in_file || 0) < 100000 ? '<span class="tag bad">偏短</span>' : '<span class="tag ok">正常</span>']));
     }
     // 推理页文件下拉（两类数据集都进）
     if ($('pFile')) {
+      // data-* 上带着点数/标签/类型，updateWindowHint() 靠它提示"最多能取几个窗口"
       $('pFile').innerHTML = files.map(f => `<option value="${esc((ds.dataset_dir || '') + '\\' + f.filename)}"
         data-samples="${f.samples_in_file || f.rows || 0}" data-label="${esc(f.label)}" data-kind="${esc(ds.dataset_type || 'matlab')}">
         ${esc(f.filename)}　（${esc(f.label)}，${f.samples_in_file || f.rows || 0} ${isTabular ? '行' : '点'}）</option>`).join('');
@@ -847,7 +893,7 @@ async function loadDatasets() {
         if (files.length) loadSignal();
       }
     }
-    // 训练页目录下拉的提示
+    // 训练页目录下拉的提示：表格数据集按当前 length/stride 估算每个文件能切多少窗口
     if ($('tDirHint') && ds.dataset_type === 'tabular') {
       const len = Number($('tLength')?.value) || 784, stride = Number($('tStride')?.value) || 150;
       const perFile = Math.max(0, Math.floor(((ds.min_rows || 0) - len) / stride) + 1);
@@ -856,6 +902,7 @@ async function loadDatasets() {
     }
   } catch (e) { if ($('dsFiles')) $('dsFiles').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
+/* 训练页的目录下拉：把每个数据集拼成 option，data-type 告诉 doTrain() 该按哪种数据源训 */
 function fillDirSelect() {
   if (!$('tDir')) return;
   const keep = $('tDir').value;
@@ -868,6 +915,7 @@ function fillDirSelect() {
   $('tDir').innerHTML = opts.join('');
   if (keep && [...$('tDir').options].some(o => o.value === keep)) $('tDir').value = keep;
 }
+/* 手动指定数据源类型时，把目录下拉自动切到同类型的第一个数据集，免得选了"表格"却指着 .mat 目录 */
 function onSourceChange() {
   const kind = $('tSource').value;
   const opt = $('tDir')?.selectedOptions[0];
@@ -880,6 +928,7 @@ function onSourceChange() {
     ? '表格数据集：length/stride 决定每个文件能切多少窗口；越界窗口会被跳过并在结果里回报。'
     : 'CWRU .mat：取 DE 通道，按 length/stride 滑窗。';
 }
+/* 表格数据集列表（按数据集分块，每块一张文件表 + 一个「预览」按钮） */
 async function loadTabularList() {
   try {
     const keys = DATASET_KEYS.filter(k => (DATASETS[k] || {}).dataset_type === 'tabular');
@@ -909,14 +958,16 @@ async function loadTabularList() {
     if (TP_FILES.length && $('tpBody').dataset.loaded !== '1') previewTable(TP_FILES[0].path);
   } catch (e) { $('tabularList').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
+/* 点表格里的「预览」：按下标取出真实路径（避开上面说的反斜杠转义问题） */
 let TP_FILES = [];
 function previewTableAt(index) {
   const item = TP_FILES[index];
   if (!item) return;
   $('tpFile').value = item.path;
-  $('tpColumn').value = '';
+  $('tpColumn').value = '';                            // 清掉上次手动指定的列，让后端重新推荐
   previewTable(item.path);
 }
+/* 上传表格文件：走 multipart（字段名 file 可重复），一个文件 = 一个类别 */
 async function uploadTables() {
   const files = $('upFiles').files;
   if (!files || !files.length) { setStatus('upStatus', '先选择文件', 'err'); return; }
@@ -929,14 +980,16 @@ async function uploadTables() {
     setStatus('upStatus', `已保存 ${r.saved.length} 个到 ${r.directory}` +
       (r.skipped.length ? `；跳过 ${r.skipped.length} 个（${r.skipped.map(s => s.filename + ': ' + s.reason).join('; ')}）` : ''));
     toast(`上传完成（${r.saved.length} 个文件）`);
-    LAST_KEYS = '';                       // 强制重建选择器
+    LAST_KEYS = '';                       // 强制重建选择器（目录名可能要新建）
     await loadDatasets(); await loadTabularList();
   } catch (e) { setStatus('upStatus', '失败：' + e.message, 'err'); toast(e.message, true); }
 }
+/* 表格预览：列统计 + 前 N 行 + 当前/可选的信号列（数据展示页与数据集管理页都用它） */
 async function previewTable(path, column) {
   if (path) $('tpFile').value = path;
   const target = $('tpFile').value;
   if (!target) return;
+  // column 显式传 undefined 才读下拉框；传 null/'' 表示"回到自动识别"
   const col = column !== undefined ? column : $('tpColumn').value.trim();
   $('tpTitle').textContent = target;
   try {
@@ -959,9 +1012,10 @@ async function previewTable(path, column) {
           c.min ?? '—', c.max ?? '—', c.mean ?? '—', c.std ?? '—'])) +
       `<h4 style="margin-top:12px">前 ${d.head_rows} 行</h4>` +
       table(d.column_names.map(n => ({ t: n })), d.head.map(row => row.map(v => v === null ? '<span class="hint">null</span>' : esc(v))));
-    $('tpBody').dataset.loaded = '1';
+    $('tpBody').dataset.loaded = '1';       // 标记"已经预览过"，避免下次进页面被默认预览覆盖
   } catch (e) { $('tpBody').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
+/* 推理页的窗口提示：按文件点数与窗口长度估算 index 的上限（真正的上限以产物 input_len 为准） */
 function updateWindowHint() {
   const opt = $('pFile') && $('pFile').selectedOptions[0];
   if (!opt) { $('pFileHint').textContent = '没有可选文件'; return; }
@@ -970,6 +1024,7 @@ function updateWindowHint() {
   $('pFileHint').innerHTML = `真实类别：<b>${esc(opt.dataset.label)}</b>　可用窗口 index：<b>0 ~ ${max < 0 ? '无' : max}</b>
     （按训练窗口长度 ${len} 估算；以产物 input_len 为准，越界会被服务拒绝并说明原因）`;
 }
+/* 「库表登记」子页：读 / 写 Datasets 表（和磁盘上的数据集是两回事，这里是登记记录） */
 async function loadDatasetDb() {
   try {
     const d = await api('/datasets/db'), rows = d.datasets || [];
@@ -981,12 +1036,13 @@ async function loadDatasetDb() {
       : '<div class="empty">还没有登记记录</div>';
   } catch (e) { $('dsDbList').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
+/* 手动登记一个数据集（同名则沿用已有行，后端会回 already_existed） */
 async function registerDataset() {
   const body = { name: $('rName').value.trim(), source: $('rSource').value.trim() || null,
     data_path: $('rPath').value.trim() || null, description: $('rDesc').value.trim() || null };
   if (!body.name) { setStatus('regStatus', '名称不能为空', 'err'); return; }
   const c = $('rClass').value, s = $('rSamples').value;
-  if (c !== '') body.class_count = Number(c);
+  if (c !== '') body.class_count = Number(c);          // 留空 = 不填这一列，不要把空串转成 0
   if (s !== '') body.sample_count = Number(s);
   try {
     const r = await post('/datasets/db', body);
@@ -995,11 +1051,12 @@ async function registerDataset() {
     loadDatasetDb();
   } catch (e) { setStatus('regStatus', '失败：' + e.message, 'err'); toast(e.message, true); }
 }
+/* 「信号浏览」：取一段原始信号（后端已降采样）+ 统计量，交给 drawWave 画到 canvas 上 */
 async function loadSignal() {
   const path = $('sigFile').value;
   const dataset = $('dsPick')?.value || DATASET_KEYS[0];
   if (!path) { return; }
-  const file = path.split('\\').pop();
+  const file = path.split('\\').pop();        // 接口只认文件名 + dataset 键，不接完整路径
   const column = ($('sigColumn')?.value || '').trim();
   try {
     const d = await api(`/datasets/signal?dataset=${encodeURIComponent(dataset)}&file=${encodeURIComponent(file)}`
@@ -1015,13 +1072,14 @@ async function loadSignal() {
     ].map(([t, v, s]) => `<div class="card"><h4>${t}</h4><div style="font-size:15px;font-weight:600">${esc(v)}</div><div class="hint">${esc(s)}</div></div>`).join('');
   } catch (e) { toast('取信号失败：' + e.message, true); }
 }
+/* 手写 canvas 波形（不引图表库）：网格 → 零线 → 波形 → 刻度 */
 function drawWave(values) {
   const cv = $('waveCanvas'), ctx = cv.getContext('2d');
   const W = cv.width, H = cv.height, pad = 34;
   ctx.clearRect(0, 0, W, H);
   if (!values || !values.length) { ctx.fillStyle = '#6B6860'; ctx.fillText('无数据', pad, H / 2); return; }
   let min = Math.min(...values), max = Math.max(...values);
-  if (min === max) { min -= 0.5; max += 0.5; }
+  if (min === max) { min -= 0.5; max += 0.5; }         // 直线信号：上下各撑 0.5，避免除以 0
   const x = i => pad + i * (W - pad * 2) / (values.length - 1);
   const y = v => H - pad - (v - min) * (H - pad * 2) / (max - min);
   // 网格
@@ -1041,6 +1099,7 @@ function drawWave(values) {
   ctx.fillText(max.toFixed(3), 4, pad + 4); ctx.fillText(min.toFixed(3), 4, H - pad + 4);
   ctx.fillText('0', pad - 4, H - 6); ctx.fillText(String(values.length - 1), W - pad - 22, H - 6);
 }
+/* 图库：拉全量图后在浏览器里过滤，不用反复打接口 */
 async function loadFigures() {
   try {
     ALL_FIGS = (await api('/figures?limit=300')).figures || [];
@@ -1050,13 +1109,14 @@ async function loadFigures() {
 let ALL_FIGS = [];
 function renderGallery() {
   const q = ($('figFilter')?.value || '').trim().toLowerCase();
-  const list = ALL_FIGS.filter(f => !q || f.file.toLowerCase().includes(q));
+  const list = ALL_FIGS.filter(f => !q || f.file.toLowerCase().includes(q));   // 按路径子串过滤（模型名/版本都能当关键词）
   $('gallery').innerHTML = list.length
     ? list.map(f => figCard({ ...f, name: f.file.split('/').pop() })).join('')
     : '<div class="empty">没有匹配的图</div>';
 }
 
 /* ========================= 系统管理 ========================= */
+/* 运行信息 + 数据库面板 + 产物/图/日志占用，全部来自一次 /system */
 async function loadSystem() {
   try {
     const s = await api('/system');
@@ -1091,6 +1151,7 @@ async function loadSystem() {
     if ($('figCountHint')) $('figCountHint').textContent = `${s.figures.count} 张 / ${kb(s.figures.total_kb)}`;
   } catch (e) { $('sysRuntime').innerHTML = `<dt>错误</dt><dd class="miss">${esc(e.message)}</dd>`; }
 }
+/* 训练日志：列表 + 尾部查看（Keras 进度条带 ANSI 转义，后端已剥掉） */
 async function loadLogs() {
   try {
     const d = await api('/system/logs'), rows = d.logs || [];
@@ -1100,7 +1161,7 @@ async function loadLogs() {
         `<button class="btn small" onclick="loadLogFile('${esc(r.name)}')">查看</button>`])) : '<div class="empty">还没有日志</div>';
   } catch (e) { $('logList').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
-let CURRENT_LOG = null;
+let CURRENT_LOG = null;                     // 记着当前看的日志名，「刷新」时不用再选一次
 async function loadLogFile(name) {
   CURRENT_LOG = name;
   $('logTitle').textContent = name;
@@ -1111,6 +1172,7 @@ async function loadLogFile(name) {
   } catch (e) { $('logBody').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
 function reloadLogFile() { if (CURRENT_LOG) loadLogFile(CURRENT_LOG); }
+/* 接口索引：直接铺 /api 返回的路由表，加了新接口这里会自动出现 */
 async function loadApiIndex() {
   try {
     const d = await api('/api');
@@ -1119,6 +1181,7 @@ async function loadApiIndex() {
       `<div class="hint" style="margin-top:8px">可用模型：${esc((d.models || []).join(' / '))}</div>`;
   } catch (e) { $('apiList').innerHTML = `<div class="empty miss">${esc(e.message)}</div>`; }
 }
+/* 维护操作都是破坏性的，先二次确认再发请求 */
 async function cleanupFigures() {
   if (!confirmDanger('确认清空 data/figures 下所有 PNG？此操作不可撤销（下次训练/推理会重新生成）。')) return;
   try {
@@ -1128,6 +1191,7 @@ async function cleanupFigures() {
     loadSystem(); if ($('gallery')) loadFigures();
   } catch (e) { setStatus('maintStatus', '失败：' + e.message, 'err'); toast(e.message, true); }
 }
+/* 删除某个模型版本（DELETE /models/<名>?version=vN），会连同该版本的权重/scaler/meta 一起删 */
 async function deleteVersion() {
   const m = $('delModel').value, v = $('delVersion').value.trim();
   if (!v) { setStatus('delStatus', '必须填写版本号，例如 v1', 'err'); return; }
@@ -1140,6 +1204,7 @@ async function deleteVersion() {
 }
 
 /* ============================ 顶栏状态 ============================ */
+/* 只打 /health（它有 30 秒行数缓存，轮询代价很小），失败时把状态点标红 */
 async function refreshHealth() {
   try {
     const h = await api('/health'), db = h.database || {};
@@ -1153,6 +1218,7 @@ async function refreshHealth() {
     $('dotSvc').className = 'dot bad'; $('footSvc').textContent = '服务不可用'; $('footDb').textContent = e.message;
   }
 }
+/* 重新拉当前所在页面的数据（训练/推理结束后、维护操作后调用） */
 function refreshAll() {
   refreshHealth();
   const m = state.module, s = state.sub[m] || FIRST_SUB[m];
@@ -1174,7 +1240,7 @@ function refreshAll() {
 go('home');
 refreshHealth();
 loadDatasets();          // 首页也会用到数据集（为后续模块预取，失败不影响首页）
-setInterval(refreshHealth, 15000);
+setInterval(refreshHealth, 15000);   // 每 15 秒刷一次顶栏状态点
 </script>
 </body>
 </html>

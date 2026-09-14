@@ -30,10 +30,12 @@ TIME_HINTS = ("时间", "时刻", "序号", "采样点序号", "time", "timestam
 
 
 def is_table(path: Path | str) -> bool:
+    """是不是一张可读的表格（只看扩展名，不打开文件）。"""
     return Path(path).suffix.lower() in TABLE_SUFFIXES
 
 
 def has_tables(directory: Path | str) -> bool:
+    """目录里是否存在表格文件——训练侧据此自动判定数据源类型（matlab / tabular）。"""
     directory = Path(directory)
     return directory.is_dir() and any(is_table(p) for p in directory.iterdir() if p.is_file())
 
@@ -54,30 +56,34 @@ def label_from_filename(filename: str) -> str:
 
 # ------------------------------------------------------------------ 读表
 def read_table(path: Path | str, sheet: str | int | None = None) -> pd.DataFrame:
+    """读成 DataFrame。Excel 按后缀挑引擎，CSV 依次试编码并在必要时重猜分隔符。"""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix in EXCEL_SUFFIXES:
+        # .xls 是老格式，只有 xlrd 能读；.xlsx/.xlsm 交给 openpyxl
         engine = "xlrd" if suffix == ".xls" else "openpyxl"
         return pd.read_excel(path, sheet_name=sheet if sheet is not None else 0, engine=engine)
     last_error = None
+    # 编码顺序是照中文 Excel 导出的实际情况排的：utf-8-sig（带 BOM）最保险，GBK 兜底
     for encoding in ("utf-8-sig", "utf-8", "gbk"):
         try:
             frame = pd.read_csv(path, encoding=encoding)
             if frame.shape[1] == 1:                       # 可能是分号/制表符分隔
                 alt = pd.read_csv(path, encoding=encoding, sep=None, engine="python")
-                if alt.shape[1] > frame.shape[1]:
+                if alt.shape[1] > frame.shape[1]:         # 猜出来的列更多才采纳，避免把单列数据拆坏
                     frame = alt
             return frame
         except UnicodeDecodeError as exc:                  # 换编码重试
             last_error = exc
             continue
-        except Exception as exc:
+        except Exception as exc:                           # 其它错误（空文件、格式坏）换编码也没用
             last_error = exc
             break
     raise ValueError(f"读取失败：{path.name}（{last_error}）")
 
 
 def list_sheets(path: Path | str) -> list[str]:
+    """Excel 的 sheet 名列表（非 Excel 或读失败一律返回空列表，调用方无需处理异常）。"""
     path = Path(path)
     if path.suffix.lower() not in EXCEL_SUFFIXES:
         return []
@@ -116,6 +122,7 @@ def pick_signal_column(frame: pd.DataFrame, column: str | None = None) -> str:
         return column
 
     def named_like_signal(name: str) -> bool:
+        """列名看着像信号吗：命中 SIGNAL_HINTS 且没命中 TIME_HINTS（时间列优先排除）。"""
         low = name.lower()
         if any(hint in low for hint in TIME_HINTS):
             return False
@@ -145,6 +152,7 @@ def read_signal(path: Path | str, column: str | None = None,
 
 # ------------------------------------------------------------------ 预览/体检
 def _jsonable(value):
+    """把 numpy / pandas 的标量转成能进 JSON 的 Python 原生值（NaN → None）。"""
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return None
     if isinstance(value, (np.integer,)):
@@ -213,6 +221,7 @@ def _ttl_cache(max_age: float = 120.0):
 
     def deco(fn):
         def wrapper(*args, **kwargs):
+            """按 (位置参数, 排序后的关键字参数) 做键查缓存，过期或没有就真跑一遍。"""
             key = (str(args), str(sorted(kwargs.items())))
             hit = store.get(key)
             if hit and _time.time() - hit[0] < max_age:

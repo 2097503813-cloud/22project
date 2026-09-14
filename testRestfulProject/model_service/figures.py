@@ -37,6 +37,7 @@ _style_ready = False
 
 
 def _pyplot():
+    """懒加载 matplotlib 并配好全局样式（只做一次）。返回 pyplot 模块。"""
     global _plt, _style_ready
     if _plt is None:
         import matplotlib
@@ -44,6 +45,8 @@ def _pyplot():
         import matplotlib.pyplot as plt
         from matplotlib import font_manager
 
+        # 只挂系统里**真的存在**的中文字体：硬写一个不存在的字体名，
+        # matplotlib 会静默回落到方框，图上的中文全变成"豆腐块"
         available = {f.name for f in font_manager.fontManager.ttflist}
         cjk = [f for f in _CJK_FONTS if f in available]
         plt.rcParams["font.sans-serif"] = cjk + ["DejaVu Sans"]
@@ -58,6 +61,7 @@ def _pyplot():
 
 
 def has_cjk() -> bool:
+    """本机有没有可用的中文字体（/system 用它提示"图上中文可能显示不全"）。"""
     _pyplot()
     return _style_ready
 
@@ -79,10 +83,11 @@ def _short_labels(labels: list[str]) -> list[str]:
 
 
 def _save(fig, path: Path) -> dict:
+    """落盘一张图并关掉它（不 close 会累积内存），返回带可直接访问 url 的条目。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, bbox_inches="tight", dpi=120)
     _pyplot().close(fig)
-    rel = path.relative_to(FIG_DIR).as_posix()
+    rel = path.relative_to(FIG_DIR).as_posix()      # 统一成正斜杠，前端当 URL 用
     return {"name": path.name, "path": str(path), "url": f"/figures/{rel}",
             "size_kb": round(path.stat().st_size / 1024, 1)}
 

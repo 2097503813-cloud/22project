@@ -32,11 +32,14 @@ from .db import DBError, database
 from .figures import training_figures
 from .registry import save_artifact
 
+# 别名表：接口上写「算法模型1」「cnn」「pytorch」都能落到同一个内部键，
+# 内部键同时是 data/models/<键> 的目录名，别随意改
 ALIASES = {
     "1dcnn": "1dcnn", "1d-cnn": "1dcnn", "cnn": "1dcnn", "算法模型1": "1dcnn", "模型1": "1dcnn",
     "cwt_cnn": "cwt_cnn", "cwt": "cwt_cnn", "pytorch": "cwt_cnn", "算法模型2": "cwt_cnn", "模型2": "cwt_cnn",
     "adtk": "adtk", "pcaad": "adtk", "异常检测": "adtk", "算法模型3": "adtk", "模型3": "adtk",
 }
+# 每个内部键在 Models 表里的登记信息（db_name 与 sql/schema*.sql 的种子数据保持一致）
 MODEL_META = {
     "1dcnn": {"db_name": "1DCNN",
               "description": "一维卷积神经网络，CWRU 轴承振动信号 10 类故障分类。", "type": "Classification"},
@@ -54,6 +57,7 @@ def db_model_name(name: str) -> str:
 
 
 def normalize_model(name: str | None, default: str = "1dcnn") -> str:
+    """把用户写的模型名（别名/大小写/中文）规范成内部键；不认识就抛 ValueError。"""
     if not name:
         return default
     key = str(name).strip().lower()
@@ -75,6 +79,7 @@ def _seed_everything(seed: int) -> None:
 
 
 def _log_path(model: str) -> Path:
+    """这次训练的输出文件名（起止时间靠文件名区分，内容由 train() 重定向 stdout 写入）。"""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return config.log_dir / f"train-{model}-{stamp}.log"
 
@@ -140,6 +145,11 @@ def load_dataset(opts: dict, length: int, number: int, stride: int, rate: list) 
 
 # ============================================================ 算法模型1：1DCNN
 def _train_1dcnn(opts: dict) -> dict:
+    """按原脚本的网络结构训一个 TensorFlow/Keras 1DCNN。
+
+    返回的 dict 是**训练结果描述**（指标、超参、类别表、saver 回调），不含模型对象；
+    真正的落盘由 train() 拿 saver 去执行。这样落盘失败/成功都能统一处理。
+    """
     length = int(opts.get("length", 784))
     number = int(opts.get("number", 600))
     stride = int(opts.get("stride", 150))
@@ -237,6 +247,11 @@ def _train_1dcnn(opts: dict) -> dict:
 
 # ========================================================= 算法模型2：cwt_cnn
 def _train_cwt_cnn(opts: dict) -> dict:
+    """与 1DCNN 同任务的 PyTorch 实现，额外产出混淆矩阵所需的原始预测。
+
+    网络结构与训练循环都来自 cwt_cnn/cwt_cnn_pytorch.py（build_model/train_model/evaluate），
+    这里只负责把数据切窗、送进设备、收集指标。
+    """
     length = int(opts.get("length", 784))
     number = int(opts.get("number", 300))
     stride = int(opts.get("stride", 150))
@@ -269,6 +284,10 @@ def _train_cwt_cnn(opts: dict) -> dict:
     confusion = confusion_matrix(y_true_np, y_pred_np).tolist()
 
     def saver(target: Path) -> Path:
+        """落盘回调（由 registry.save_artifact 调用）：先存标准化参数，再存网络权重。
+
+        scaler 必须和权重放在同一个目录：推理侧要靠它把原始振动值换算到训练时的分布。
+        """
         if data["scaler"] is not None:
             np.savez(target / "scaler.npz", mean=data["scaler"]["mean"], scale=data["scaler"]["scale"])
         path = target / "model.pt"
@@ -418,6 +437,11 @@ def _train_adtk(opts: dict) -> dict:
         adtk_flag_rate = None
 
     def saver(target: Path) -> Path:
+        """落盘回调：标准化参数 + 检测器/连续分数器 + 全部标定信息。
+
+        阈值、拟合窗口数、基线来源都写进同一个 pkl：推理侧才能复现"当时是怎么判的"，
+        而不是重新按当前数据猜一个阈值。
+        """
         path = target / "detector.pkl"
         with open(path, "wb") as fh:
             pickle.dump({"detector": detector, "transformer": transformer, "detector_name": detector_name,

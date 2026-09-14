@@ -48,6 +48,8 @@ CWRU_0HP_CLASSES: list[tuple[str, int, str]] = [
 # 体检结果缓存：{目录: (时间戳, 结果)}。数据文件不会一秒一变，进页面时不必反复体检。
 _DESCRIBE_CACHE: dict[str, tuple[float, dict]] = {}
 
+# 未登记 .mat 的兜底命名规则：文件名前缀 → 故障部位（捕获组里是故障尺寸，单位 0.001in）。
+# 只影响"显示成什么名字"，不影响类别号——未登记文件的类别号在 load_windows 里递增分配。
 _FAULT_PATTERNS = [    (re.compile(r"^48k_Drive_End_B0(\d+)_", re.I), "滚动体故障"),
     (re.compile(r"^48k_Drive_End_IR0(\d+)_", re.I), "内圈故障"),
     (re.compile(r"^48k_Drive_End_OR0(\d+)@", re.I), "外圈故障"),
@@ -188,8 +190,7 @@ def load_windows(dataset_dir: Path | str, length: int, number: int, stride: int,
         "legacy_scaler": legacy_scaler,
         "seed": seed,
         # 每个 table 行现在都对应一个独立类别（已登记的用登记 id，未登记的递增）
-        "num_classes": len(table),
-        "nan_windows_total": int(sum(row["nan_windows"] for row in per_class)),
+        "num_classes": len(table),        "nan_windows_total": int(sum(row["nan_windows"] for row in per_class)),
         "skipped_out_of_range_total": int(sum(
             row["skipped_out_of_range"]["train"] + row["skipped_out_of_range"]["test"] for row in per_class)),
         "unregistered_files": [row["filename"] for row in table if row["class_id"] is None],

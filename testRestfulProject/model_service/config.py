@@ -34,12 +34,14 @@ UPLOAD_DIR = DATA_DIR / "datasets"          # 上传/存放的表格数据集（
 SQL_DIR = PROJECT_DIR / "sql"
 SQLITE_PATH = DATA_DIR / "model_management.db"
 
+# 内置的 CWRU .mat 数据集：键是前端/接口里用的数据集名，值是磁盘目录
 DATASET_DIRS = {
     "CWRU-0HP": PROJECT_DIR / "1DCNN" / "0HP",
     "CWRU-0HP(cwt)": PROJECT_DIR / "cwt_cnn" / "0HP",
 }
 ADTK_DATASET_DIR = PROJECT_DIR / "adtk" / "dataset"
 
+# 这三个目录是运行期必需品，import 时就建好，免得别处还要各自判存在性
 for _d in (DATA_DIR, MODEL_DIR, LOG_DIR, UPLOAD_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -77,6 +79,7 @@ def ensure_writable_tempdir() -> str:
     这里只在探测失败时才切换，正常机器上行为不变。
     """
     def _writable(path: str) -> bool:
+        """在 path 里真写一个临时文件试试——mkdir 成功不等于能写（ACL 可能只给读）。"""
         try:
             Path(path).mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=path, delete=True) as fh:
@@ -99,6 +102,7 @@ TEMP_DIR = ensure_writable_tempdir()
 
 
 def _env(name: str, default: str | None = None) -> str | None:
+    """读环境变量；空字符串按"没设"处理（否则 MODEL_DB_PASSWORD= 会被当成真的是空密码）。"""
     v = os.getenv(name)
     return v if v not in (None, "") else default
 
@@ -107,6 +111,7 @@ class Config:
     """一次进程生命周期内不变的服务配置。"""
 
     def __init__(self) -> None:
+        """把模块级的路径常量与环境变量快照成一份不可变配置。"""
         self.service_dir = SERVICE_DIR
         self.project_dir = PROJECT_DIR
         self.workspace_dir = WORKSPACE_DIR
@@ -119,15 +124,19 @@ class Config:
         self.dataset_dirs = dict(DATASET_DIRS)
         self.adtk_dataset_dir = ADTK_DATASET_DIR
 
-        self.db_dialect = (_env("MODEL_DB_DIALECT", "sqlite") or "sqlite").lower()
+        # 本项目**只支持 MySQL**：早期为了"没装库也能跑"写过 SQLite 兜底与 SQL Server 分支，
+        # 结果是三套方言各自演化、埋了不少坑（占位符、TOP/LIMIT、建表语句）。现在统一到 MySQL，
+        # 别的取值直接报错，免得有人配错了却"看起来能跑"。
+        self.db_dialect = (_env("MODEL_DB_DIALECT", "mysql") or "mysql").lower()
+        if self.db_dialect != "mysql":
+            raise RuntimeError(f"本项目只支持 MySQL（MODEL_DB_DIALECT=mysql），收到 {self.db_dialect!r}；"
+                               f"请检查 testRestfulProject/db.env")
+        # 连接参数（MySQL 默认端口 3306；账号密码放 db.env，不入库）
         self.db_host = _env("MODEL_DB_HOST", "127.0.0.1")
         self.db_user = _env("MODEL_DB_USER", "root")
         self.db_password = _env("MODEL_DB_PASSWORD", "")
         self.db_name = _env("MODEL_DB_NAME", "model_management")
-        self.db_odbc_driver = _env("MODEL_DB_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
-        self.db_trusted = _env("MODEL_DB_TRUSTED", "") in ("1", "true", "True", "yes")
-        default_port = "1433" if self.db_dialect == "sqlserver" else "3306"
-        self.db_port = int(_env("MODEL_DB_PORT", default_port) or default_port)
+        self.db_port = int(_env("MODEL_DB_PORT", "3306") or "3306")
 
         # 训练/推理默认超参，分别沿用两个脚本原有的取值，保证与既有实验可比
         self.defaults = {
@@ -151,6 +160,10 @@ class Config:
 
     # ---- 便于 /health 与日志展示 ----
     def describe(self) -> dict:
+        """给 /health 与前端「运行信息」用的配置摘要。
+
+        注意 sqlite 方言下不返回 host/port（没有意义），数据库那栏直接给本地文件路径。
+        """
         return {
             "project_dir": str(self.project_dir),
             "model_dir": str(self.model_dir),

@@ -36,12 +36,13 @@ USE `model_management`;
 
 /* ---------------- 1. Datasets ---------------- */
 CREATE TABLE IF NOT EXISTS `Datasets` (
+    /* 数据集：DatasetName 唯一，db.ensure_dataset() 按它做"有就取、没有就建" */
     `DatasetID`    INT           NOT NULL AUTO_INCREMENT,
     `DatasetName`  VARCHAR(100)  NOT NULL,
-    `Source`       VARCHAR(200)  NULL,
-    `SampleCount`  INT           NULL,
-    `ClassCount`   INT           NULL,
-    `DataPath`     VARCHAR(500)  NULL,
+    `Source`       VARCHAR(200)  NULL,        -- CWRU 官方数据集 / 用户上传 / ADHOC 临时登记
+    `SampleCount`  INT           NULL,        -- 样本（窗口）数
+    `ClassCount`   INT           NULL,        -- 类别数；无监督模型为 NULL
+    `DataPath`     VARCHAR(500)  NULL,        -- 数据目录（接口返回时已脱敏）
     `Description`  VARCHAR(500)  NULL,
     `CreatedDate`  DATETIME(6)   NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (`DatasetID`),
@@ -51,14 +52,15 @@ CREATE TABLE IF NOT EXISTS `Datasets` (
 
 /* ---------------- 2. Models ---------------- */
 CREATE TABLE IF NOT EXISTS `Models` (
+    /* 模型登记表：ModelName 唯一；训练/上传时按名字"有就取用、不重复插" */
     `ModelID`     INT           NOT NULL AUTO_INCREMENT,
     `ModelName`   VARCHAR(100)  NOT NULL,
     `Description` VARCHAR(500)  NULL,
-    `ApiEndpoint` VARCHAR(255)  NULL,
-    `ModelType`   VARCHAR(50)   NULL,
+    `ApiEndpoint` VARCHAR(255)  NULL,         -- 该模型的调用入口，一般为 /predict
+    `ModelType`   VARCHAR(50)   NULL,         -- Classification / AnomalyDetection / Regression
     `CreatedDate` DATETIME(6)   NULL DEFAULT CURRENT_TIMESTAMP(6),
     `IsActive`    TINYINT(1)    NULL DEFAULT 1,
-    `Status`      VARCHAR(20)   NULL,
+    `Status`      VARCHAR(20)   NULL,         -- 可运行 / 未训练 …
     PRIMARY KEY (`ModelID`),
     UNIQUE KEY `UQ_Models_ModelName` (`ModelName`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -66,18 +68,19 @@ CREATE TABLE IF NOT EXISTS `Models` (
 
 /* ---------------- 3. EdgeDevices ---------------- */
 CREATE TABLE IF NOT EXISTS `EdgeDevices` (
+    /* 边缘设备：当前 model_service 不写这张表（「边缘设备」支线未落地），保留结构供后续部署使用 */
     `DeviceID`      INT           NOT NULL AUTO_INCREMENT,
     `DeviceName`    VARCHAR(100)  NOT NULL,
     `DeviceType`    VARCHAR(50)   NULL,
-    `IPAddress`     VARCHAR(45)   NULL,
+    `IPAddress`     VARCHAR(45)   NULL,       -- IPv4/IPv6 文本
     `Location`      VARCHAR(255)  NULL,
-    `HardwareSpecs` LONGTEXT      NULL,
-    `EdgeStatus`    VARCHAR(20)   NULL,
+    `HardwareSpecs` LONGTEXT      NULL,       -- 硬件规格（自由文本 / JSON）
+    `EdgeStatus`    VARCHAR(20)   NULL,       -- 设备侧运行状态（与 Status 语义重叠，见 schema.sql 末尾备注）
     `LastHeartbeat` DATETIME(6)   NULL,
     `DeviceCode`    VARCHAR(100)  NULL,
     `MacAddress`    VARCHAR(50)   NULL,
     `OsVersion`     VARCHAR(100)  NULL,
-    `Status`        VARCHAR(20)   NULL,
+    `Status`        VARCHAR(20)   NULL,       -- 本平台的登记状态
     `IsActive`      TINYINT(1)    NULL DEFAULT 1,
     `Remark`        VARCHAR(500)  NULL,
     `CreatedDate`   DATETIME(6)   NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -87,21 +90,23 @@ CREATE TABLE IF NOT EXISTS `EdgeDevices` (
 
 /* ---------------- 4. Trainings ---------------- */
 CREATE TABLE IF NOT EXISTS `Trainings` (
+    /* 训练记录：被 ModelInvocations / ModelDeployments / InferenceTasks 三张表引用，
+       是整套结构的中枢——InferenceTasks.TrainingID 就是这里的"权威锚点" */
     `TrainingID`    INT           NOT NULL AUTO_INCREMENT,
-    `ModelID`       INT           NOT NULL,
-    `DatasetID`     INT           NULL,
-    `TrainName`     VARCHAR(200)  NULL,
+    `ModelID`       INT           NOT NULL,   -- 外键，模型必须已登记
+    `DatasetID`     INT           NULL,       -- 可空：删除数据集时会置空
+    `TrainName`     VARCHAR(200)  NULL,       -- 形如 1dcnn-20250912-193000
     `Epochs`        INT           NULL,
     `BatchSize`     INT           NULL,
-    `Accuracy`      DOUBLE        NULL,
+    `Accuracy`      DOUBLE        NULL,       -- 测试集准确率；无监督模型为 NULL
     `Loss`          DOUBLE        NULL,
-    `ModelPath`     VARCHAR(500)  NULL,
-    `Status`        VARCHAR(20)   NULL,
+    `ModelPath`     VARCHAR(500)  NULL,       -- 权重文件路径，指向 data/models/<模型>/vN/…
+    `Status`        VARCHAR(20)   NULL,       -- 成功 / 失败
     `CreatedDate`   DATETIME(6)   NULL DEFAULT CURRENT_TIMESTAMP(6),
     `StartedDate`   DATETIME(6)   NULL,
     `CompletedDate` DATETIME(6)   NULL,
     `CreatedBy`     VARCHAR(100)  NULL,
-    `Remark`        VARCHAR(500)  NULL,
+    `Remark`        VARCHAR(500)  NULL,       -- 跳过越界窗口数、NaN 窗口数、日志/图目录等 JSON
     PRIMARY KEY (`TrainingID`),
     KEY `IX_Trainings_ModelID` (`ModelID`),
     CONSTRAINT `FK_Trainings_Models`   FOREIGN KEY (`ModelID`)   REFERENCES `Models` (`ModelID`),
@@ -111,18 +116,19 @@ CREATE TABLE IF NOT EXISTS `Trainings` (
 
 /* ---------------- 5. ModelInvocations ---------------- */
 CREATE TABLE IF NOT EXISTS `ModelInvocations` (
+    /* 每次 /predict 留一条（失败也留）——最简单的调用审计日志 */
     `InvocationID`   INT           NOT NULL AUTO_INCREMENT,
     `ModelID`        INT           NOT NULL,
-    `TrainingID`     INT           NULL,
-    `ApiEndpoint`    VARCHAR(255)  NULL,
-    `RequestParams`  LONGTEXT      NOT NULL,
-    `ResponseResult` LONGTEXT      NULL,
-    `DurationMs`     INT           NULL,
-    `IsSuccess`      TINYINT(1)    NULL,
-    `StatusCode`     INT           NULL,
+    `TrainingID`     INT           NULL,      -- 能定位到哪次训练时才有值
+    `ApiEndpoint`    VARCHAR(255)  NULL,      -- 目前都是 /predict
+    `RequestParams`  LONGTEXT      NOT NULL,  -- 请求参数 JSON（samples 体积太大，不记）
+    `ResponseResult` LONGTEXT      NULL,      -- 成功摘要 / 失败错误 JSON
+    `DurationMs`     INT           NULL,      -- 本次耗时（毫秒）
+    `IsSuccess`      TINYINT(1)    NULL,      -- 1/0
+    `StatusCode`     INT           NULL,      -- HTTP 状态码
     `ErrorMessage`   LONGTEXT      NULL,
     `ClientIP`       VARCHAR(50)   NULL,
-    `Status`         VARCHAR(20)   NULL,
+    `Status`         VARCHAR(20)   NULL,      -- 成功 / 失败
     `InvocationDate` DATETIME(6)   NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (`InvocationID`),
     KEY `IX_ModelInvocations_ModelID_Date` (`ModelID`, `InvocationDate`),
@@ -133,17 +139,18 @@ CREATE TABLE IF NOT EXISTS `ModelInvocations` (
 
 /* ---------------- 6. ModelDeployments ---------------- */
 CREATE TABLE IF NOT EXISTS `ModelDeployments` (
+    /* 模型发布记录（把某次训练产出的模型投放到某台边缘设备）。当前服务同样不写这张表 */
     `DeploymentID`    INT           NOT NULL AUTO_INCREMENT,
     `ModelID`         INT           NOT NULL,
-    `TrainingID`      INT           NOT NULL,
+    `TrainingID`      INT           NOT NULL,  -- 发布的是哪一次训练的产物
     `DeviceID`        INT           NOT NULL,
-    `Version`         VARCHAR(50)   NULL,
-    `VersionAlias`    VARCHAR(20)   NULL,
-    `Environment`     VARCHAR(20)   NULL,
-    `DeployUrl`       VARCHAR(255)  NULL,
-    `DeployedPath`    VARCHAR(500)  NULL,
+    `Version`         VARCHAR(50)   NULL,      -- 版本号，如 v2
+    `VersionAlias`    VARCHAR(20)   NULL,      -- 别名，如 latest / stable
+    `Environment`     VARCHAR(20)   NULL,      -- 环境：prod / test …
+    `DeployUrl`       VARCHAR(255)  NULL,      -- 部署后的访问地址
+    `DeployedPath`    VARCHAR(500)  NULL,      -- 设备上的产物路径
     `ServicePort`     INT           NULL,
-    `RuntimeParams`   LONGTEXT      NULL,
+    `RuntimeParams`   LONGTEXT      NULL,      -- 运行参数（JSON）
     `IsActive`        TINYINT(1)    NULL DEFAULT 1,
     `IsCurrent`       TINYINT(1)    NOT NULL DEFAULT 1,
     `DeployStatus`    VARCHAR(20)   NULL,
@@ -164,20 +171,22 @@ CREATE TABLE IF NOT EXISTS `ModelDeployments` (
 
 /* ---------------- 7. InferenceTasks ---------------- */
 CREATE TABLE IF NOT EXISTS `InferenceTasks` (
+    /* 一次推理 = 一个任务，明细在 InferenceResults。
+       TrainingID / TargetDatasetID 都是 NOT NULL 外键：推理前必须已有成功的训练记录 */
     `InferenceTaskID`  INT           NOT NULL AUTO_INCREMENT,
-    `TrainingID`       INT           NOT NULL,
-    `TargetDatasetID`  INT           NOT NULL,
-    `TaskName`         VARCHAR(200)  NOT NULL,
-    `TaskType`         VARCHAR(20)   NOT NULL,
+    `TrainingID`       INT           NOT NULL,  -- 权威锚点
+    `TargetDatasetID`  INT           NOT NULL,  -- 内联样本会登记成 ADHOC-<模型> 数据集
+    `TaskName`         VARCHAR(200)  NOT NULL,  -- 形如 predict-1dcnn-20250912-193000
+    `TaskType`         VARCHAR(20)   NOT NULL,  -- classification / anomaly_detection
     `Status`           VARCHAR(20)   NULL,
-    `InferenceParams`  LONGTEXT      NULL,
-    `ResultSummary`    LONGTEXT      NULL,
+    `InferenceParams`  LONGTEXT      NULL,      -- 请求参数 JSON
+    `ResultSummary`    LONGTEXT      NULL,      -- 样本数、预测分布、模型版本…
     `ErrorMessage`     LONGTEXT      NULL,
-    `DeploymentID`     INT           NULL,
+    `DeploymentID`     INT           NULL,      -- 当前留空，等边缘设备支线落地后回填
     `ModelID`          INT           NULL,
-    `DeviceID`         INT           NULL,
-    `InputPath`        VARCHAR(500)  NULL,
-    `OutputPath`       VARCHAR(500)  NULL,
+    `DeviceID`         INT           NULL,      -- 同上，留空
+    `InputPath`        VARCHAR(500)  NULL,      -- 输入来源文件路径
+    `OutputPath`       VARCHAR(500)  NULL,      -- 出图目录
     `Progress`         INT           NULL,
     `CreatedDate`      DATETIME(6)   NULL DEFAULT CURRENT_TIMESTAMP(6),
     `StartedDate`      DATETIME(6)   NULL,
@@ -197,23 +206,26 @@ CREATE TABLE IF NOT EXISTS `InferenceTasks` (
 
 /* ---------------- 8. InferenceResults ---------------- */
 CREATE TABLE IF NOT EXISTS `InferenceResults` (
+    /* 推理结果明细，一个任务 N 行（一个窗口一行）。
+       分类任务用 PredictedClass/Label/Confidence，异常检测用 IsAnomaly/AnomalyScore，
+       两类共享同一张表，所以近义列较多（见 schema.sql 末尾的冗余列备注） */
     `ResultID`          BIGINT        NOT NULL AUTO_INCREMENT,
     `InferenceTaskID`   INT           NOT NULL,
-    `RowIdentifier`     VARCHAR(100)  NULL,
-    `ResultTimestamp`   DATETIME(6)   NULL,
-    `PredictedValue`    DOUBLE        NULL,
-    `AnomalyScore`      DOUBLE        NULL,
+    `RowIdentifier`     VARCHAR(100)  NULL,   -- 形如 内圈故障.csv#3，用来回溯这一行的来源
+    `ResultTimestamp`   DATETIME(6)   NULL,   -- 该行结果的时间（取写入时刻）
+    `PredictedValue`    DOUBLE        NULL,   -- 分类任务里的置信度（同类名字段）
+    `AnomalyScore`      DOUBLE        NULL,   -- 异常检测：窗口重构误差 / 异常点占比
     `IsAnomaly`         TINYINT(1)    NULL,
-    `PredictedCategory` VARCHAR(50)   NULL,
+    `PredictedCategory` VARCHAR(50)   NULL,   -- Classification / AnomalyDetection
     `Confidence`        DOUBLE        NULL,
-    `FeatureSnapshot`   VARCHAR(500)  NULL,
+    `FeatureSnapshot`   VARCHAR(500)  NULL,   -- top_k 的 JSON 快照（超 500 字符只记 truncated）
     `ModelID`           INT           NULL,
-    `SampleIndex`       INT           NULL,
-    `PredictedClass`    INT           NULL,
-    `PredictedLabel`    VARCHAR(100)  NULL,
-    `Score`             DOUBLE        NULL,
-    `ActualClass`       INT           NULL,
-    `ResultDetail`      LONGTEXT      NULL,
+    `SampleIndex`       INT           NULL,   -- 窗口序号
+    `PredictedClass`    INT           NULL,   -- 类别号
+    `PredictedLabel`    VARCHAR(100)  NULL,   -- 类别中文名
+    `Score`             DOUBLE        NULL,   -- 与 Confidence 同值
+    `ActualClass`       INT           NULL,   -- 输入来自登记过的数据集文件时才有真值
+    `ResultDetail`      LONGTEXT      NULL,   -- 判定细节 JSON（阈值、重构误差、相对倍数…）
     `CreatedDate`       DATETIME(6)   NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (`ResultID`),
     KEY `IX_InferenceResults_TaskID` (`InferenceTaskID`),

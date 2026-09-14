@@ -33,7 +33,7 @@ from .registry import load_artifact
 
 
 class InvalidInput(ValueError):
-    """输入不合法（长度不符、含 NaN/Inf、文件不可读等）。"""
+    """输入不合法（长度不符、含 NaN/Inf、文件不可读等）——接口据此回 400。"""
 
 
 # ------------------------------------------------------------------ 取输入
@@ -102,9 +102,11 @@ def _build_matrix(samples, path, input_len: int, index: int, limit: int,
 
 
 def _validate(matrix: np.ndarray, input_len: int) -> None:
+    """形状与数值的双重校验：长度不符、含 NaN/Inf、空样本都直接拒收。"""
     if matrix.shape[1] != input_len:
         raise InvalidInput(f"每个样本长度必须是 {input_len}，收到 {matrix.shape[1]}")
     if not np.all(np.isfinite(matrix)):
+        # 只报前 5 行坏样本的行号，避免几百行 NaN 把报错信息撑爆
         bad = np.where(~np.isfinite(matrix).all(axis=1))[0].tolist()[:5]
         raise InvalidInput(f"样本里存在 NaN/Inf（行号 {bad} ...），拒绝推理。"
                            f"这类样本通常来自数据切片越界后的 NaN 填充。")
@@ -132,6 +134,7 @@ def _apply_scaler(artifact, matrix: np.ndarray) -> np.ndarray:
 
 
 def _predict_keras(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    """tensorflow-keras 路线：喂 (n, length, 1)，输出 softmax 概率后取 top_k。"""
     import tensorflow.keras as keras
     model = keras.models.load_model(artifact.weights)
     scaled = _apply_scaler(artifact, matrix)
@@ -143,6 +146,7 @@ def _predict_keras(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
 
 
 def _predict_torch(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    """pytorch 路线：按 meta 里的 num_classes/length 重建网络，加载 state_dict 后前向。"""
     import torch
     mod = _import_module("cwt_cnn", "cwt_cnn_pytorch")
     input_len = int(artifact.meta.get("input_len") or matrix.shape[1])   # 缺 input_len 时按实际窗口长度
@@ -253,7 +257,8 @@ def _predict_adtk(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
 
 
 def _classification_row(i: int, prob_row: np.ndarray, labels: list, top_k: int) -> dict:
-    order = np.argsort(prob_row)[::-1][:max(1, int(top_k))]
+    """一行分类结果：取概率最高的类别，并附上前 top_k 的备选。"""
+    order = np.argsort(prob_row)[::-1][:max(1, int(top_k))]     # 至少保留 1 个
     best = int(order[0])
     return {
         "index": i,
@@ -269,6 +274,11 @@ def _classification_row(i: int, prob_row: np.ndarray, labels: list, top_k: int) 
 
 
 def _import_module(dir_name: str, module_name: str):
+    """把项目子目录塞进 sys.path 后导入模块（推理侧要复用训练时的网络定义）。
+
+    与 training._import_project_module 同源：cwt_cnn 的模块名没法靠包路径导入，
+    只能先补 sys.path 再 import。
+    """
     d = str(config.project_dir / dir_name)
     if d not in sys.path:
         sys.path.insert(0, d)

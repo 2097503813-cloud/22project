@@ -6,7 +6,7 @@
   "num_classes": null,
   "labels": null,
   "dataset": {
-    "name": "CWRU-0HP(normal基线)",
+    "name": "CWRU-0HP",
     "path": "D:\\22project\\testRestfulProject\\1DCNN\\0HP",
     "stats": {
       "baseline_source": "D:\\22project\\testRestfulProject\\1DCNN\\0HP\\normal_0_97.mat",
@@ -16,12 +16,12 @@
       "c": 5.0,
       "feature_mode": "stats",
       "feature_dim": 10,
-      "windows": 311,
-      "threshold": 0.0020914678922407857,
+      "windows": 600,
+      "threshold": 0.0015883593538232215,
       "threshold_quantile": 0.995,
       "factor": 1.0,
       "baseline_false_positive_rate": 0.0,
-      "adtk_default_flag_rate": 0.031914893617021274
+      "adtk_default_flag_rate": 0.0
     }
   },
   "params": {
@@ -32,7 +32,7 @@
     "sampling_rate": 48000.0,
     "length": 784,
     "number": 600,
-    "stride": 784,
+    "stride": 150,
     "threshold_quantile": 0.995,
     "factor": 1.0,
     "baseline_file": "normal_0_97.mat"
@@ -45,16 +45,16 @@
     "history": {},
     "classification_report": null,
     "baseline_false_positive_rate": 0.0,
-    "threshold": 0.0020914678922407857,
-    "score_median": 0.0001516903021166627,
+    "threshold": 0.0015883593538232215,
+    "score_median": 0.00014444895012975762,
     "note": "无监督模型，没有测试集准确率；推理返回 IsAnomaly + AnomalyScore（adtk 窗口重构误差）。"
   },
   "confusion": null,
   "scaler_file": null,
-  "trained_at": "2026-09-15T01:44:09",
-  "log_file": "D:\\22project\\testRestfulProject\\data\\logs\\train-adtk-20260915-014409.log",
+  "trained_at": "2026-09-15T12:05:30",
+  "log_file": "D:\\22project\\testRestfulProject\\data\\logs\\train-adtk-20260915-120530.log",
   "trusted": true,
   "provenance": "train",
   "weights_file": "detector.pkl",
-  "created_at": "2026-09-15T01:44:09"
+  "created_at": "2026-09-15T12:05:33"
 }

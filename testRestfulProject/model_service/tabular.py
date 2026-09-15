@@ -13,6 +13,7 @@
   * 越界窗口与 .mat 一样：strict=True 跳过并回报，绝不补 NaN
 """
 from __future__ import annotations
+import csv
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -27,6 +28,18 @@ SIGNAL_HINTS = ("振幅", "振动", "幅值", "加速度", "signal", "value", "a
                 "de_time", "de", "acc")
 # 时间/序号列优先排除：它们天然单调递增、std 也很大，是最容易被误选成"振动信号"的干扰项。
 TIME_HINTS = ("时间", "时刻", "序号", "采样点序号", "time", "timestamp", "date", "index", "no.")
+# "重猜分隔符"时**只认这几种**。为什么要有白名单：`csv.Sniffer` 会把表头里的普通字母也当候选分隔符，
+# 单列表头 `signal` 会被按字母 `s` 切开（列名变成 `Unnamed: 0` + `ignal`），而列数确实从 1 变成 2，
+# 光靠"猜出来列更多才采纳"根本挡不住 —— 实测 `signal` / `value` 都会中招。
+# 分隔符只可能是这几个符号，把白名单卡在这里最省事，也不影响正常的分号/制表符数据。
+_PLAUSIBLE_SEPS = (",", ";", "\t", "|")
+def _sniff_sep(text: str) -> str | None:
+    """猜 CSV 分隔符；猜不出或猜出来的不是常见分隔符就返回 None（调用方据此保持原样）。"""
+    try:
+        sep = csv.Sniffer().sniff(text).delimiter
+    except Exception:                       # Sniffer 对单列/不规则文本会抛"Could not determine delimiter"
+        return None
+    return sep if sep in _PLAUSIBLE_SEPS else None
 def is_table(path: Path | str) -> bool:
     """是不是一张可读的表格（只看扩展名，不打开文件）。"""
     # 只看后缀不打开文件：便宜到可以在遍历目录时随便调；代价是坏文件/空文件也会被认成表格，
@@ -74,12 +87,25 @@ def read_table(path: Path | str, sheet: str | int | None = None) -> pd.DataFrame
         try:
             frame = pd.read_csv(path, encoding=encoding)
             if frame.shape[1] == 1:                       # 可能是分号/制表符分隔
-                # ⚠️ 只在"读出来只有一列"时才嗅探分隔符，且**只有猜出的列更多才采纳**：
-                #    sep=None 走 python 引擎、会把整个文件重读一遍（成本高），
-                #    无条件采纳还可能把本来正常的单列数据按逗号/点号拆坏。
-                alt = pd.read_csv(path, encoding=encoding, sep=None, engine="python")
-                if alt.shape[1] > frame.shape[1]:         # 猜出来的列更多才采纳，避免把单列数据拆坏
-                    frame = alt
+                # ⚠️ 只在"读出来只有一列"时才重猜分隔符，且必须**两个条件同时成立**才采纳：
+                #    ① 猜出来的列更多；② 猜出来的分隔符在 _PLAUSIBLE_SEPS 白名单里。
+                #    条件②是踩过的坑：不加它的话 Sniffer 会把表头里的普通字母当分隔符，
+                #    单列表头 `signal` 被按 `s` 切开、列数从 1 变 2，条件①反而"通过"了。
+                # ⚠️ 重猜失败**绝不能连累已经读成功的结果**：`正常\\n1.0\\n2.0\\n3.0` 这种中文单列表头
+                #    会让 Sniffer 抛 "Could not determine delimiter"，以前那个异常直接 break 掉整个循环，
+                #    把一份完全正常的单列数据变成"读取失败"。所以这里自己 try 住、失败就原样返回。
+                try:
+                    sample = path.read_text(encoding=encoding, errors="replace")[:4096]
+                except Exception:
+                    sample = ""
+                sep = _sniff_sep(sample)
+                if sep:
+                    try:
+                        alt = pd.read_csv(path, encoding=encoding, sep=sep)
+                    except Exception:
+                        alt = None
+                    if alt is not None and alt.shape[1] > frame.shape[1]:
+                        frame = alt
             return frame
         except UnicodeDecodeError as exc:                  # 换编码重试
             last_error = exc

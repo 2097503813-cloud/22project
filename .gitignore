@@ -44,8 +44,13 @@ desktop.ini
 # DSH 工具自身的文件
 .deepseek/
 testRestfulProject/data/uploads/
-testRestfulProject/_*.py
 testRestfulProject/data/**/*.db
+
+# 一次性/临时脚本不入库；但 **_selftest_*.py 是正式测试，必须入库**。
+# ⚠️ 这条例外是踩了坑才补的：`_selftest_predict_path.py` 因为落在 `_*.py` 这条规则里而从未被跟踪，
+#    被误删之后 git 里根本没有它、无法恢复，只能按原来的断言重写一份。测试脚本不能再这样丢。
+testRestfulProject/_*.py
+!testRestfulProject/_selftest_*.py
 
 testRestfulProject/requirements.lock
 

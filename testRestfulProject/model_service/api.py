@@ -51,12 +51,12 @@ MAX_LIMIT = 500           # 单次 /predict 最多多少窗口
 # 判断它到底是不是权重文件，并尽量把 input_len / num_classes 猜出来。
 WEIGHT_SUFFIXES = {
     ".h5": "tensorflow-keras", ".keras": "tensorflow-keras",
-    ".pt": "pytorch", ".pth": "pytorch",
+    ".pt": "pytorch", ".pth": "pytorch", ".pt2": "pytorch-exported",
     ".pkl": "adtk", ".pickle": "adtk",
 }
 # 上传文件夹时，这些扩展名之外的文件一律忽略（允许带上 scaler/meta/说明文件等附属文件）
 KEEP_SUFFIXES = {".json", ".npz", ".npy", ".txt", ".yaml", ".yml", ".onnx", ".csv",
-                 ".h5", ".keras", ".pt", ".pth", ".pkl", ".pickle"}
+                 ".h5", ".keras", ".pt", ".pth", ".pt2", ".pkl", ".pickle"}
 # PyTorch 的输出层一般叫这些名字，用来从 state_dict 里认出"最后一层"从而读出类别数
 _HEAD_LAYER_RE = re.compile(r"(fc|classifier|linear|head|dense|out|output)\d*\.weight$")
 def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
@@ -107,6 +107,47 @@ def _keras_shapes(config: dict) -> tuple[int | None, int | None]:
             units = int(lc["units"])
             break
     return input_len, units
+def _exported_input_len(blob: bytes, names: list[str]) -> int | None:
+    """从 torch.export（.pt2）产物里读回输入长度（窗口长度）。
+
+    torch.export 的包里 `archive/data/sample_inputs/<名>` 存的是导出时的示例输入，
+    用 `weights_only=True` 读它是安全的（里面只有张量，不会执行代码）。
+    ⚠️ 它的结构是 `[args, kwargs]` 这种**嵌套**（实测读到 `[[Tensor(2,1,784)], {}]`），
+       所以要递归找第一个"至少二维"的张量，只看一层会读不到。
+    ⚠️ 读不出来就返回 None —— 调用方会退回"表单/meta 里的 input_len"，
+       不该因为读不到一个提示值就把整个上传判失败。
+       （TorchScript 就属于读不出来的那种：它的 traced_inputs 是空的/需要自定义类。）
+    """
+    import io
+    import zipfile
+    candidates = [n for n in names if n.startswith("archive/data/sample_inputs/")]
+    if not candidates:
+        return None
+    try:
+        import torch
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            raw = zf.read(candidates[0])
+        obj = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
+    except Exception:
+        return None
+    def dig(node, depth=0):
+        """递归找第一个 dim>=2 的张量，(n,1,length) 与 (n,length) 的最后一维都是 length。"""
+        if depth > 5:
+            return None
+        if isinstance(node, torch.Tensor):
+            return int(node.shape[-1]) if node.dim() >= 2 else None
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                found = dig(item, depth + 1)
+                if found:
+                    return found
+        if isinstance(node, dict):
+            for item in node.values():
+                found = dig(item, depth + 1)
+                if found:
+                    return found
+        return None
+    return dig(obj)
 def probe_weight(filename: str, blob: bytes) -> dict:
     """判断一个上传文件是不是模型权重，并尽量读出 input_len / num_classes。
 
@@ -165,16 +206,39 @@ def probe_weight(filename: str, blob: bytes) -> dict:
             result.update(ok=True, input_len=input_len, num_classes=units,
                           reason=f"Keras HDF5（顶层 {keys[:5]}，input_len={input_len}，类别数={units}）")
             return result
-        # ---------------- .pt / .pth：torch>=1.6 存的是 zip 容器，里面必有 data.pkl ----------------
-        if suffix in (".pt", ".pth"):
+        # ---------------- .pt / .pth / .pt2：torch 的三种 zip 容器，靠**包内条目**区分 ----------------
+        # 为什么要分三种：本平台最早的 pytorch 路线是"重建架构 + load_state_dict"，
+        # 那条路**只对用本服务训出来的模型有效**（外部模型结构不同就报键不匹配）。
+        # 想让外部 pytorch 模型"上传就能用"，就必须是**自包含**格式 —— 结构跟着权重一起走：
+        #   · .pt2（torch.export 产物）：torch 在 Python 3.14 上官方推荐的序列化方式，
+        #     包里带 archive/data/weights/，加载不需要任何模型类
+        #   · TorchScript（torch.jit.trace/script 产物）：包里带 code/，同样自包含
+        #   · 老的 state_dict 包：只有张量、没有结构，仍然需要架构同构
+        if suffix in (".pt", ".pth", ".pt2"):
             if blob[:2] != b"PK":
                 result["reason"] = (f"不是 PyTorch 检查点（torch>=1.6 的 .pt 是 zip，应以 PK 开头；"
                                     f"实际开头 {blob[:4]!r}）")
                 return result
             with zipfile.ZipFile(io.BytesIO(blob)) as zf:
                 names = zf.namelist()
+            is_exported = any(name.startswith("archive/data/weights/") for name in names)
+            # ⚠️ TorchScript 的条目是 `archive/code/__torch__/...`（前缀带 archive/），
+            #    所以判据要用 "/code/" 而不是 startswith("code/")，否则漏判成老式 state_dict。
+            is_torchscript = (not is_exported) and any("/code/" in name or name.endswith("/code")
+                                                      for name in names)
+            if is_exported or is_torchscript:
+                kind = "torch.export 产物（.pt2）" if is_exported else "TorchScript"
+                # 自包含格式：结构就在包里，不需要任何架构源码，加载后直接可调用
+                result["framework"] = "pytorch-exported" if is_exported else "pytorch-jit"
+                input_len = _exported_input_len(blob, names) if is_exported else None
+                result.update(ok=True, input_len=input_len,
+                              reason=f"{kind}（自包含，无需架构代码；input_len={input_len}，"
+                                     f"类别数留到推理时按输出宽度定）")
+                return result
             if not any(name.endswith("data.pkl") for name in names):
-                result["reason"] = f"zip 里没有 torch 的 data.pkl（含 {names[:5]}），不像 PyTorch 模型"
+                result["reason"] = (f"zip 里既没有 torch 的 data.pkl、也没有 "
+                                    f"archive/data/weights/（torch.export）或 code/（TorchScript）"
+                                    f"（含 {names[:5]}），不像 PyTorch 模型")
                 return result
             try:
                 import torch
@@ -182,12 +246,20 @@ def probe_weight(filename: str, blob: bytes) -> dict:
                 result.update(ok=True, reason=f"PyTorch 检查点（本机无 torch，跳过参数解析：{exc}）")
                 return result
             try:
-                # weights_only=True：只反序列化张量，不执行 pickle 里的任意对象
+                # ⚠️ 这里**必须** weights_only=True：它是 .pt 上传路径唯一的防代码执行闸门。
+                #    （实测我们自己的 payload {state_dict, length, num_classes} 在
+                #     weights_only=True 下完全读得出来 —— int/dict/tensor 都在安全白名单里，
+                #     原先用 False 是没必要的。）
                 obj = torch.load(io.BytesIO(blob), map_location="cpu", weights_only=True)
             except Exception as exc:
-                # 存成"完整模型对象"时 weights_only 会拒绝，但那**确实是模型**：
-                # 宁可少读一个类别数，也不要误判成"不是模型"
-                result.update(ok=True, reason=f"PyTorch 检查点（未解析参数：{type(exc).__name__}）")
+                # weights_only=True 读不了 = 包里带了自定义类（"存整个模型对象"那种）。
+                # 以前这里 ok=True 放过去，等于推理时再决定 —— 而推理那边用的是
+                # weights_only=False，**会把上传者提供的代码跑起来**。
+                # 现在改成如实说明：能认出"这是个 torch 存档"，但本平台不会为它执行反序列化。
+                result.update(ok=True, num_classes=None,
+                              reason=f"PyTorch 存档，但需要自定义类才能读（{type(exc).__name__}）。"
+                                     f"要让它**能推理**，请导出成自包含格式："
+                                     f"torch.export（得到 .pt2）或 torch.jit.trace + torch.jit.save")
                 return result
             state = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
             shapes = [(k, tuple(v.shape)) for k, v in state.items()] if hasattr(state, "items") else []
@@ -199,7 +271,9 @@ def probe_weight(filename: str, blob: bytes) -> dict:
             head = next((s for k, s in reversed(shapes) if len(s) == 2 and _HEAD_LAYER_RE.search(k)), None)
             head = head or next((s for _, s in reversed(shapes) if len(s) == 2), None)
             result.update(ok=True, num_classes=int(head[0]) if head else None,
-                          reason=f"PyTorch state_dict（{len(shapes)} 个张量，类别数={int(head[0]) if head else None}）")
+                          reason=f"PyTorch state_dict（{len(shapes)} 个张量，类别数={int(head[0]) if head else None}；"
+                                 f"注意：这种格式没有结构，推理时按本项目的 cwt_cnn 架构重建，"
+                                 f"外部模型若结构不同请改用 torch.export）")
             return result
         # ---------------- .pkl：只验 pickle 魔数，**绝不反序列化** ----------------
         # 反序列化 pickle = 执行文件里的任意代码，而这是"上传"来的文件；
@@ -944,11 +1018,16 @@ class ModelUpload(Resource):
         probed: list[dict] = []
         for filename, framework in candidates:
             info = probe_weight(filename, blobs[filename])
-            probed.append({"filename": filename, "framework": framework, "ok": info["ok"],
-                           "reason": info["reason"], "input_len": info["input_len"],
-                           "num_classes": info["num_classes"]})
+            probed.append({"filename": filename, "framework": info.get("framework") or framework,
+                           "ok": info["ok"], "reason": info["reason"],
+                           "input_len": info["input_len"], "num_classes": info["num_classes"]})
             if info["ok"]:
-                weights, probe = (filename, framework), info
+                # ⚠️ framework 必须**以探测结果为准**，不能再用后缀表猜的那个：
+                #    `.pt` 底下其实有三种完全不同的 torch 格式（老式 state_dict / TorchScript /
+                #    torch.export），后缀根本区分不了，只有打开包看内容才知道；
+                #    而推理侧正是靠 framework 分派到对应的加载方式。用后缀表会把
+                #    TorchScript 误标成 pytorch，于是推理时走到"重建架构"那条错路上去。
+                weights, probe = (filename, info.get("framework") or framework), info
                 break
         else:                       # 一个都没通过 → 不是模型（candidates 非空，所以只有"全不通过"会到这）
             return {"error": "上传的内容不是一个模型：没有任何文件通过权重校验",

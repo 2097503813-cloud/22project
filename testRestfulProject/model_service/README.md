@@ -94,6 +94,59 @@ data/logs/train-<模型>-<时间>.log          ← 训练全过程日志
 SQLite 兜底库`，那个 sqlite 兜底连同它的 `SQLITE_PATH` 常量都已被删除——`MODEL_DB_DIALECT`
 写 `mysql` 以外的值会在启动时直接 `RuntimeError`（详见第三节）。
 
+## 二·半、「上传的模型」支持哪些格式 / 怎么让外部模型直接用
+
+判定用的是 `api.probe_weight()`：**先看后缀，再打开文件看内容**（详见下面那张表）。
+推理分派靠产物 `meta.json` 里的 `framework`，**以探测结果为准**（不是后缀表猜的那个——
+`.pt` 底下有三种不同格式，后缀区分不了）。
+
+| 后缀 | 内容判据 | framework | 推理怎么加载 | 能不能直接用外部模型 |
+|---|---|---|---|---|
+| `.keras` / `.h5` | zip 且含 `config.json` 或 `metadata.json` | `tensorflow-keras` | `keras.models.load_model()` **整模型加载** | ✅ **能**，任何 Keras 模型 |
+| `.keras` / `.h5` | 非 zip（HDF5）且含 `model_weights` 组或 `model_config` 属性 | `tensorflow-keras` | 同上 | ✅ 能 |
+| `.pt2`（推荐） | zip 含 `archive/data/weights/` | `pytorch-exported` | `torch.export.load()` → 直接可调用 | ✅ **能**，自包含 |
+| `.pt` / `.pth` | zip 含 `/code/`（TorchScript 标记） | `pytorch-jit` | `torch.jit.load()` | ✅ 能，自包含（但 Py3.14 上 torch 已标记弃用，见下） |
+| `.pt` / `.pth` | zip 含 `data.pkl`，`weights_only=True` 读得出 | `pytorch` | 按 **`cwt_cnn_pytorch.build_model`** 重建架构再 `load_state_dict()` | ❌ 只有结构同构才行 |
+| `.pt` / `.pth` | 上面都读不出（带自定义类） | `pytorch` | **拒绝**并指路（除非设 `MODEL_ALLOW_UNTRUSTED_PICKLE=1`） | ❌ 需先导出成自包含格式 |
+| `.pkl` / `.pickle` | 首字节 `0x80`（**绝不反序列化**） | `adtk` | 只认本项目 adtk 产物（要带 `feature_mode` + `transformer`） | ❌ 别的 pickle 会被拒 |
+
+### 让外部 PyTorch 模型「上传就能用」—— 导出成自包含格式
+
+本平台最早的 pytorch 路线是"重建架构 + `load_state_dict`"，所以只对**本项目训出来的** `.pt` 有效。
+外部模型（换个网络结构）走那条必然键不匹配。要能直接用，就让**结构跟着权重一起走**：
+
+```python
+# ① 推荐：torch.export（.pt2）—— torch 在 Python 3.14 上官方推荐的序列化方式
+import torch
+from torch.export import export, Dim
+model.eval()
+ep = export(model, (torch.randn(2, 1, 848),), dynamic_shapes=({0: Dim("n")},))  # ⚠️ 必须带 dynamic_shapes
+torch.export.save(ep, "model.pt2")
+# 上传时把 model.pt2 + scaler.npz（可选）+ meta.json（可选，写 labels/input_len）一起选上
+
+# ② 备选：TorchScript —— 自包含，但 torch 明确警告 Python 3.14+ 不受支持，可能失效
+traced = torch.jit.trace(model, torch.randn(2, 1, 848)); torch.jit.save(traced, "model.pt")
+```
+
+三个实测踩过的坑，都已在代码里兜住或写进提示：
+- **`dynamic_shapes` 不能省**：否则导出时那个示例 batch 会被烤死，换个窗口数就
+  `Guard failed: x.size()[0] == 2`。输入**长度**则会被固定 —— 这符合本平台契约（推理只用产物里的 `input_len`）。
+- **`.pt2` 的 `input_len` 会自动读出来**（从包内 `archive/data/sample_inputs/`，结构是嵌套的
+  `[args, kwargs]`，要递归找）；**TorchScript 读不出来**，用上传表单的 `input_len` 或 meta.json 补。
+- **输入形状与输出激活**都做了自适应：依次试 `(n,1,L)` / `(n,L)` / `(n,L,1)`；
+  输出若每行都在 `[0,1]` 且行和≈1 就当概率，否则当 logits 做 softmax
+  （想固定就在 meta.json 写 `"output_activation": "none"` 或 `"softmax"`）。
+
+### 安全口径（`.pt` 的反序列化闸门）
+
+`.pkl` 一直有 `trusted` 闸门；`.pt` 原先**没有**，而它的推理路径用的是
+`torch.load(weights_only=False)` —— 等于上传一个 `.pt` 就能在服务端执行代码。现已收口：
+- 老式 state_dict 路径改用 **`weights_only=True`**（实测我们自己的 payload 在 True 下完全读得出来，
+  int/dict/tensor 都在安全白名单里，原来写 False 的理由并不成立）；
+- 读不了（带自定义类）时**明确拒绝**并给出两条出路（导出成自包含格式 / 显式设
+  `MODEL_ALLOW_UNTRUSTED_PICKLE=1`），**不再默认降级到会执行代码的那条路**；
+- 自包含格式（`.pt2` / TorchScript）加载的是受限 IR，不含 Python 代码，所以不需要闸门。
+
 ## 二·补、出图（matplotlib，落 PNG 不弹窗）
 
 原来"表现"结果的地方只有三个脚本里的 `plt.show()`（1DCNN 的准确率/损失曲线、cwt_cnn 的混淆矩阵、

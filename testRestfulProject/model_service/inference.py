@@ -143,24 +143,113 @@ def _predict_keras(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
     # 类别表缺失时退化成 class_0/class_1…（仍给出可读类别名，不至于整行空白）
     labels = artifact.meta.get("labels") or [f"class_{i}" for i in range(probs.shape[1])]
     return [_classification_row(i, probs[i], labels, top_k) for i in range(len(probs))]
-def _predict_torch(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
-    """pytorch 路线：按 meta 里的 num_classes/length 重建网络，加载 state_dict 后前向。
+def _torch_probs_from_callable(forward, scaled: np.ndarray, input_len: int) -> "np.ndarray":
+    """把「可直接调用的 torch 模型」跑出概率矩阵 (n, num_classes)。
 
-    这条路**只对"用本服务训练出来的" .pt 有效**：脚本里的 build_model 必须存在，
-    且 state_dict 的键要与该结构同构；手工上传的 .pt 结构不同就会报键不匹配。
+    自包含格式（torch.export / TorchScript）共用这一段：它们不需要任何架构代码，
+    拿到就是可调用对象，差别只在"怎么拿到这个对象"。
+    两处外部模型必定会遇到的不一致，这里都兜住：
+      · **输入形状**：本项目的约定是 (n, 1, length)（通道在最前），但外部模型常见 (n, length)。
+        依次试三种形状，能用哪种就用哪种；三种都不行就把三种的报错一起抛出去，便于定位。
+      · **输出是 logits 还是概率**：本项目自己的模型前向返回 logits（softmax 在推理侧做），
+        而别人导出的模型可能已经把 softmax 写进 forward 了。判据：若每行都在 [0,1]
+        且行和≈1，就当概率直接用；否则当 logits 做 softmax。
+        想固定下来就在产物 meta.json 里写 "output_activation": "none"（已是概率）或 "softmax"。
+    """
+    import torch
+    n = scaled.shape[0]
+    shapes = [(n, 1, input_len), (n, input_len), (n, input_len, 1)]
+    errors = []
+    out = None
+    for shape in shapes:
+        try:
+            with torch.no_grad():
+                out = forward(torch.tensor(scaled.reshape(*shape), dtype=torch.float32))
+            break
+        except Exception as exc:                       # noqa: BLE001
+            errors.append(f"{shape}: {type(exc).__name__}: {str(exc)[:80]}")
+    if out is None:
+        raise InvalidInput("这个 pytorch 产物喂不进去：本平台按 (n, 1, length) / (n, length) / "
+                           f"(n, length, 1) 三种形状都试过，全部失败 —— {'; '.join(errors)}")
+    if isinstance(out, (tuple, list)):                 # 有的导出会返回 (logits, aux)
+        out = out[0]
+    probs = out.detach().cpu().numpy().astype(float)
+    if probs.ndim == 1:                                # (n,) 当成单类，补成 (n,1)
+        probs = probs.reshape(-1, 1)
+    row_sum = probs.sum(axis=1)
+    looks_like_probs = bool(np.all(probs >= 0) and np.all(probs <= 1) and np.allclose(row_sum, 1.0, atol=1e-3))
+    if not looks_like_probs:
+        e = np.exp(probs - probs.max(axis=1, keepdims=True))
+        probs = e / e.sum(axis=1, keepdims=True)
+    return probs
+def _predict_exported(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    """torch.export 产物（.pt2）：**自包含**，不需要任何架构代码 —— 外部 pytorch 模型的推荐入口。
+
+    用户侧怎么产出（一行）：
+        import torch; from torch.export import export, Dim
+        ep = export(model.eval(), (torch.randn(2, 1, 848),), dynamic_shapes=({0: Dim("n")},))
+        torch.export.save(ep, "model.pt2")
+    ⚠️ 必须带 `dynamic_shapes`：否则导出时那个示例 batch 会被**烤死**，换个窗口数推理就报
+       `Guard failed: x.size()[0] == 2`（实测踩过）。
+    ⚠️ 输入长度会被固定成导出时的 length，这是符合本平台契约的 —— 推理永远用产物 meta 里的 input_len。
+    """
+    import torch
+    model = torch.export.load(str(artifact.weights))
+    return _exported_rows(artifact, matrix, top_k, model.module())
+def _predict_torchscript(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    """TorchScript 产物（torch.jit.trace/script + torch.jit.save）：同样自包含。
+
+    ⚠️ torch 从 2.x 起明确警告：**Python 3.14+ 上 torch.jit 不受支持、可能失效**
+       （本项目正是 3.14）。所以这条路留着是为了兼容已有的 TorchScript 文件，
+       **新导出的模型建议用 torch.export（.pt2）**。
+    """
+    import torch
+    model = torch.jit.load(str(artifact.weights), map_location="cpu")
+    return _exported_rows(artifact, matrix, top_k, model)
+def _exported_rows(artifact, matrix: np.ndarray, top_k: int, forward) -> list[dict]:
+    """自包含 torch 模型的公共收尾：套 scaler → 前向 → 组行。"""
+    input_len = int(artifact.meta.get("input_len") or matrix.shape[1])
+    scaled = _apply_scaler(artifact, matrix)
+    probs = _torch_probs_from_callable(forward, scaled, input_len)
+    labels = artifact.meta.get("labels") or [f"class_{i}" for i in range(probs.shape[1])]
+    return [_classification_row(i, probs[i], labels, top_k) for i in range(len(probs))]
+def _predict_torch(artifact, matrix: np.ndarray, top_k: int) -> list[dict]:
+    """**老式** pytorch 路线：按 meta 里的 num_classes/length 重建架构，再 load_state_dict。
+
+    这条路只对"用本服务训练出来的" .pt 有效（脚本里的 build_model 必须存在、且结构同构）。
+    ⚠️ 外部 pytorch 模型别走这里，请导出成自包含格式（.pt2 或 TorchScript）——
+       走这条会因为键不匹配而失败。
     """
     import torch
     from .training import _import_project_module      # 懒导入，避免与 training 循环依赖
     # 复用训练侧同一个导入器：cwt_cnn 的模块名没法靠包路径导入，只能先补 sys.path 再 import
     mod = _import_project_module("cwt_cnn", "cwt_cnn_pytorch")
     input_len = int(artifact.meta.get("input_len") or matrix.shape[1])   # 缺 input_len 时按实际窗口长度
-    # weights_only=False：因为要读 payload 里的 num_classes（不只是张量）。
-    # ⚠️ 与 .pkl 同理，这等于对上传产物做反序列化；trusted 闸门目前只拦了 .pkl 分支，
-    #    上传的 .pt 走这条路仍有风险，属于已知待办。
-    payload = torch.load(artifact.weights, map_location="cpu", weights_only=False)
-    model = mod.build_model(num_classes=payload.get("num_classes", artifact.meta.get("num_classes") or 10),
+    # ⚠️ weights_only=True 是这条路唯一的"不执行上传者代码"闸门，别改回 False。
+    #    实测我们自己的 payload {state_dict, length, num_classes} 在 True 下完全读得出来
+    #    （int / dict / tensor 都在安全白名单里），原先写 False 的理由并不成立。
+    try:
+        payload = torch.load(artifact.weights, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        # 读不了 = 包里带了自定义类。以前这会一路走到推理并**把上传者提供的代码跑起来**；
+        # 现在明确拒绝，并给出可执行的出路（逃生舱仍是显式环境变量，不是默认行为）。
+        if os.environ.get("MODEL_ALLOW_UNTRUSTED_PICKLE"):
+            payload = torch.load(artifact.weights, map_location="cpu", weights_only=False)
+        else:
+            raise InvalidInput(
+                f"这个 .pt 需要自定义类才能反序列化（{type(exc).__name__}: {str(exc)[:80]}）。"
+                f"出于安全考虑本服务默认不会执行上传者提供的代码。两条出路："
+                f"① 推荐 —— 导出成自包含格式：torch.export（.pt2）或 torch.jit.trace + torch.jit.save；"
+                f"② 确认可信后设环境变量 MODEL_ALLOW_UNTRUSTED_PICKLE=1 再重启服务") from exc
+    model = mod.build_model(num_classes=payload.get("num_classes") or artifact.meta.get("num_classes") or 10,
                            length=input_len)     # 结构必须与保存时同构，否则 load_state_dict 报键不匹配
-    model.load_state_dict(payload["state_dict"])
+    try:
+        model.load_state_dict(payload["state_dict"])
+    except Exception as exc:
+        raise InvalidInput(
+            f"这个 .pt 的 state_dict 与本项目的 cwt_cnn 架构不同构（{type(exc).__name__}: "
+            f"{str(exc)[:120]}）。它是「只存权重、没有结构」的格式，推理时必须能重建出同一个网络；"
+            f"外部模型请改用自包含格式：torch.export（.pt2）或 torch.jit.trace + torch.jit.save") from exc
     model.eval()                                 # 关掉 dropout / BN 的训练态行为
     scaled = _apply_scaler(artifact, matrix)
     x = torch.tensor(scaled.reshape(-1, 1, input_len), dtype=torch.float32)   # (n, 1, length)：通道在最前
@@ -244,7 +333,9 @@ def _classification_row(i: int, prob_row: np.ndarray, labels: list, top_k: int) 
                    "probability": round(float(prob_row[c]), 6)} for c in order],
         "detail": {"类别总数": len(labels), "第二名概率": round(float(prob_row[int(order[1])]), 6) if len(order) > 1 else None},
     }
-_DISPATCH = {"tensorflow-keras": _predict_keras, "pytorch": _predict_torch, "adtk": _predict_adtk}
+_DISPATCH = {"tensorflow-keras": _predict_keras, "pytorch": _predict_torch,
+             "pytorch-exported": _predict_exported, "pytorch-jit": _predict_torchscript,
+             "adtk": _predict_adtk}
 # ------------------------------------------------------------------ 落库
 def _resolve_anchor(model_name: str, training_id: int | None) -> tuple[dict | None, int | None]:
     """确定 InferenceTasks 的外键锚点（TrainingID，NOT NULL）。

@@ -33,6 +33,9 @@ class DBError(RuntimeError):
     """数据库层通用错误。"""
 class DBUnavailable(DBError):
     """连不上或驱动缺失——上层据此降级并回报，而不是静默忽略。"""
+# 建表脚本里应该有的 8 张表（_tables_present 用它判断"是否已经建好、可以跳过 DDL"）
+_TABLES = ("Datasets", "Models", "Trainings", "ModelInvocations",
+           "ModelDeployments", "InferenceTasks", "InferenceResults", "EdgeDevices")
 def _now() -> str:
     """统一时间戳格式：MySQL 能解析的字符串（截断到毫秒）。"""
     return datetime.now().isoformat(sep=" ", timespec="milliseconds")
@@ -104,6 +107,7 @@ class Database:
         if self.dialect != "mysql":
             raise DBError(f"本项目只支持 MySQL，收到 {self.dialect!r}")
         self._schema_ready = False
+        self._schema_lock = threading.Lock()   # 建表必须串行化，否则并发首启会撞 MySQL 死锁（见 ensure_schema）
         self.last_bootstrap = None      # 记录「顺便建了库/表」的事实，供 /health 展示
         self._local = threading.local()  # 每线程复用一个连接（之前是每个请求都新建连接）
         self._counts_cache = {"at": 0.0, "data": None}
@@ -190,28 +194,89 @@ class Database:
             except Exception:
                 pass
     # -------------------------------------------------------------- 建表/体检
+    def _tables_present(self, conn) -> bool:
+        """8 张表是否都在（都在就不必再跑建表脚本）。
+        
+        用 information_schema 一次问清，比"跑一遍 CREATE TABLE IF NOT EXISTS 看会不会报错"便宜得多，
+        而且**不碰任何行锁** —— 这正是并发死锁的关键（见 ensure_schema 里那段说明）。
+        ⚠️ 表名比较要忽略大小写：Windows 上 MySQL 的 lower_case_table_names 默认是 1，
+        information_schema 回来的可能全是小写。
+        """
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = %s",
+                            (self.cfg.db_name,))
+                have = {str(row[0]).lower() for row in cur.fetchall()}
+            finally:
+                cur.close()
+        except Exception:                              # 查不了就当"不确定"，退回跑一遍建表脚本（幂等）
+            return False
+        return all(name.lower() in have for name in _TABLES)
     def ensure_schema(self) -> None:
-        """幂等建表（**只用 MySQL**）：执行 sql/schema_mysql.sql。
-
-        脚本里全部是 `CREATE TABLE IF NOT EXISTS`，可重复执行；库不存在时会自动创建。
+        """幂等建表（**只用 MySQL**）：执行 sql/schema_mysql.sql。表已齐全时一条语句都不执行。
+        
+        ⚠️ 为什么要加锁 —— 这是一个实测复现过的**线上 500**：
+        前端页面一加载就并行打出 /health、/models、/trainings、/inference-tasks 四个请求。
+        冷启动时 `_schema_ready` 还是 False，四个线程于是**各自在自己的连接上把整份建表脚本跑一遍**。
+        
+        死锁**不在** CREATE TABLE 上（元数据锁冲突报的是 1205 lock wait timeout），
+        而在脚本末尾那两条种子数据的 `INSERT IGNORE`：
+        `INSERT IGNORE` 撞到重复键时会在该记录上取**共享锁**，两个事务都拿到共享锁之后
+        又都要往同一个唯一键里插 —— 共享锁要升级、互等成环，InnoDB 直接判死并回 **1213**。
+        1213 是 InnoDB 的**行锁**死锁，这条错误码本身就把范围指到了 DML 上。
+        
+        实测数据（6 线程并发执行同一条语句，各 40 轮）：
+          · `INSERT IGNORE INTO Models ... VALUES (…),(…),(…)`  死锁 166/240
+          · 把它拆成 3 条单行 `INSERT IGNORE`                   死锁 173/240（拆了没用！）
+          · 单行的 `INSERT IGNORE INTO Datasets ...`            死锁 0/240
+          · 10 条 `CREATE TABLE IF NOT EXISTS`                  死锁 0/240
+        所以这**与插入几行无关**，是"并发 INSERT IGNORE 撞同一批重复键"本身的特性。
+        正解只能是"别让多个线程同时跑脚本"：拿锁串行 + 表已存在就直接返回（连脚本都不读）。
+        
+        实测对照（25 轮 × 6 线程，每轮一个全新 Database 实例模拟冷启动）：
+          修复前（无锁、必跑脚本）：死锁 6/150，脚本被执行 150 遍
+          只加锁                 ：死锁 0/150，脚本被执行 25 遍（每轮一个线程赢锁）
+          加锁 + 快路径（现状）   ：死锁 0/150，脚本被执行 0 遍
+        
+        ⚠️ 锁是**进程内**的。若在空库上同时启动两个进程，理论仍可能撞车；
+        本项目单进程运行，真要支持多进程得给脚本加重试，到时候再说。
         """
         if self._schema_ready:
             return
-        # 只用 MySQL：执行 schema_mysql.sql（库不存在就顺手建；脚本可重复执行）
-        sql = (self.cfg.sql_dir / "schema_mysql.sql").read_text(encoding="utf-8")
-        try:
-            conn = self._connect()                      # 库已存在
-        except DBUnavailable:
-            conn = self._connect(require_db=False)      # 库还不存在：脚本里有 CREATE DATABASE + USE
-            self.last_bootstrap = f"MySQL 库 {self.cfg.db_name} 由 schema_mysql.sql 顺手创建"
-        try:
-            cur = conn.cursor()
-            for stmt in _statements(sql):
-                cur.execute(stmt)
-            conn.commit()
-        finally:
-            conn.close()
-        self._schema_ready = True
+        with self._schema_lock:
+            if self._schema_ready:                     # 等锁期间别人已经建好了
+                return
+            try:
+                conn = self._connect()                 # 库已存在
+            except DBUnavailable:
+                conn = self._connect(require_db=False)  # 库还不存在：脚本里有 CREATE DATABASE + USE
+                self.last_bootstrap = f"MySQL 库 {self.cfg.db_name} 由 schema_mysql.sql 顺手创建"
+            try:
+                if self._tables_present(conn):
+                    # 表已经齐全：一条语句都不用跑。服务每次重启、每个线程的首次调用都会走到这里，
+                    # 白白跑一遍脚本既慢、又会去抢 INSERT IGNORE 的锁，没必要。
+                    self._schema_ready = True
+                    return
+                sql = (self.cfg.sql_dir / "schema_mysql.sql").read_text(encoding="utf-8")
+                cur = conn.cursor()
+                try:
+                    for stmt in _statements(sql):
+                        cur.execute(stmt)
+                    conn.commit()
+                finally:
+                    cur.close()
+            finally:
+                # ⚠️ 关掉的是 _connect() 返回的**线程本地复用连接**，所以必须把缓存一起清掉，
+                #    否则 self._local.conn 会指向一条已关闭的连接，下次 _connect 得先 ping 失败
+                #    再重连（多一次无谓的往返）。
+                #    master 连接（require_db=False）也必须在这里关：它没执行过 USE，本来就不能复用。
+                try:
+                    conn.close()
+                finally:
+                    if getattr(self._local, "conn", None) is conn:
+                        self._local.conn = None
+            self._schema_ready = True
     def ping(self) -> dict:
         """体检：顺便建表 + 取行数，**永远返回 dict 不抛异常**（/health 靠它保持可用）。"""
         try:

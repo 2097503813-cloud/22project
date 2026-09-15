@@ -139,8 +139,13 @@ def probe_weight(filename: str, blob: bytes) -> dict:
                     if "config.json" not in names and "metadata.json" not in names:
                         result["reason"] = f"压缩包里没有 config.json/metadata.json，不像 Keras 模型（含 {names[:5]}）"
                         return result
-                    config = json.loads(zf.read("config.json").decode("utf-8"))
-                input_len, units = _keras_shapes(config)   # 从结构里挖输入长度与最后一层 units
+                    # ⚠️ config.json 要**按需读**：上面的判据是"config.json **或** metadata.json 有其一"，
+                    #    但这里以前是无条件 `zf.read("config.json")` —— 于是只有 metadata.json 的包
+                    #    会抛 KeyError，被外层 except 报成"不像有效模型文件"，与判据自相矛盾。
+                    #    现在读不到就当"是模型、但猜不出结构"，返回 input_len/num_classes = None。
+                    config = (json.loads(zf.read("config.json").decode("utf-8"))
+                              if "config.json" in names else None)
+                input_len, units = _keras_shapes(config) if config else (None, None)
                 result.update(ok=True, input_len=input_len, num_classes=units,
                               reason=f"Keras 3 存档（zip，input_len={input_len}，类别数={units}）")
                 return result

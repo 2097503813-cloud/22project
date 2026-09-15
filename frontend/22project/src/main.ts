@@ -28,8 +28,6 @@ import iconfont from '/@/assets/iconfont/iconfont.json'; //引入json文件
 import '/@/assets/iconfont/iconfont.css'; //引入css
 import '/@/assets/iconfont/iconfont-01/iconfont.css'; //引入css
 import '/@/assets/iconfont/iconfont-02/iconfont.css'; //引入css
-// 自动注册插件
-import { scanAndInstallPlugins } from '/@/views/plugins/index';
 import VXETable from 'vxe-table'
 import 'vxe-table/lib/style.css'
 
@@ -42,8 +40,6 @@ iconList.addIcon(elementPlus); // 添加element plus的图标
 iconList.addIcon(fontAwesome470); // 添加fontAwesome 470版本的图标
 
 let app = createApp(App);
-
-scanAndInstallPlugins(app);
 
 app.use(eIconPicker, {
 	addIconList: eIconList, //全局添加图标
